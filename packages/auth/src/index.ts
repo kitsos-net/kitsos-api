@@ -7,6 +7,7 @@ import {
   checkRateLimit,
   checkUsageLimit,
   writeAuditLog,
+  sha256Hex,
 } from "./checks";
 
 export * from "./types";
@@ -19,6 +20,7 @@ export {
   checkRateLimit,
   checkUsageLimit,
   writeAuditLog,
+  sha256Hex,
 };
 
 const DEFAULT_RATE_LIMIT: RateLimitOptions = { windowSeconds: 60, maxRequests: 60 };
