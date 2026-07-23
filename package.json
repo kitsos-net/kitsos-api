@@ -1,0 +1,8 @@
+{
+  "name": "kitsos-api-monorepo",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ]
+}
