@@ -1,8 +1,8 @@
-name = "keys-api"
+name = "verify"
 main = "src/index.ts"
 compatibility_date = "2026-07-01"
 routes = [
-  { pattern = "keys.api.kitsos.net", custom_domain = true }
+  { pattern = "verify.api.kitsos.net", custom_domain = true }
 ]
 
 [[d1_databases]]
@@ -21,4 +21,5 @@ id = "4823ab0d3fd6452e8437631a3717f2b5"
 # Secrets — set via `wrangler secret put <name>`:
 #   CLERK_SECRET_KEY
 #   CLERK_PUBLISHABLE_KEY
-#   ADMIN_GROUP_ID   (id of the group in `groups` table treated as admins)
+#   ADMIN_GROUP_ID
+#   MAIL_API_KEY       (kitsos_... key for mail.api.kitsos.net, scope mail:send)
