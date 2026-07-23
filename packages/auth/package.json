@@ -1,0 +1,15 @@
+{
+  "name": "@kitsos/auth",
+  "version": "0.1.0",
+  "description": "Shared auth library for Kitsos API workers: Clerk JWT validation, scope/policy/resource-grant checks, rate & usage limiting",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "dependencies": {
+    "@clerk/backend": "^1.18.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250101.0",
+    "typescript": "^5.6.0"
+  }
+}
