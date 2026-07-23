@@ -1,0 +1,24 @@
+name = "mail"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+routes = [
+  { pattern = "mail.api.kitsos.net", custom_domain = true }
+]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "kitsos-api"
+database_id = "c5ccab68-5f60-4b28-8ce9-20c57b8622ea"
+
+[[kv_namespaces]]
+binding = "AUTH_CACHE"
+id = "86fb5bad46c6458d91cbb322b7178ccf"
+
+[[kv_namespaces]]
+binding = "USAGE_COUNTERS"
+id = "4823ab0d3fd6452e8437631a3717f2b5"
+
+# Secrets — set via `wrangler secret put <name>`:
+#   CLERK_SECRET_KEY
+#   CLERK_PUBLISHABLE_KEY
+#   BREVO_API_KEY
