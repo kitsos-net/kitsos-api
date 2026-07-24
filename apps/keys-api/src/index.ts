@@ -1,10 +1,17 @@
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { sha256Hex } from "@kitsos/auth";
 import { requireAdmin, requireUser } from "./middleware";
 import type { Env } from "./env";
 
 type Vars = { userId: string };
 const app = new Hono<{ Bindings: Env; Variables: Vars }>();
+
+app.use("*", cors({
+  origin: "*",
+  allowHeaders: ["Authorization", "Content-Type"],
+  allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+}));
 
 function id() {
   return crypto.randomUUID();
