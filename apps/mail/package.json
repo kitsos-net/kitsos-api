@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@kitsos/auth": "*",
+    "@kitsos/telemetry": "*",
     "hono": "^4.6.0"
   },
   "devDependencies": {

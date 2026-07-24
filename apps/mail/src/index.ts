@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { authenticate, checkResourceGrant, sha256Hex } from "@kitsos/auth";
+import { withTelemetry } from "@kitsos/telemetry";
 import { resolvePayload } from "./dotpath";
 import { sendViaBrevo } from "./brevo";
 import { getTemplateHtml, invalidateTemplateCache, renderTemplate } from "./template";
@@ -270,4 +271,4 @@ app.delete("/webhooks/:webhookId", async (c) => {
 
 app.get("/health", (c) => c.json({ ok: true }));
 
-export default app;
+export default withTelemetry(app, "mail");

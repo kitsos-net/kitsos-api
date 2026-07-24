@@ -1,0 +1,12 @@
+{
+  "name": "@kitsos/telemetry",
+  "version": "0.1.0",
+  "description": "OpenTelemetry instrumentation for Kitsos app workers, exporting to Axiom",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "dependencies": {
+    "@microlabs/otel-cf-workers": "^1.0.0-rc.49",
+    "@opentelemetry/api": "^1.9.0"
+  }
+}

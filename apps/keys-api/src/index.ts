@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { sha256Hex } from "@kitsos/auth";
+import { withTelemetry } from "@kitsos/telemetry";
 import { requireAdmin, requireUser } from "./middleware";
 import type { Env } from "./env";
 
@@ -357,4 +358,4 @@ app.route("/me", me);
 
 app.get("/health", (c) => c.json({ ok: true }));
 
-export default app;
+export default withTelemetry(app, "keys-api");

@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { withTelemetry } from "@kitsos/telemetry";
 import { requireUser, requireAdmin } from "./middleware";
 import { lookupTxtRecords, verificationRecordName, generateVerificationToken } from "./dns";
 import { sendMagicLinkEmail } from "./mail";
@@ -215,4 +216,4 @@ app.route("/admin", admin);
 
 app.get("/health", (c) => c.json({ ok: true }));
 
-export default app;
+export default withTelemetry(app, "verify");

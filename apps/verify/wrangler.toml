@@ -1,6 +1,7 @@
 name = "verify"
 main = "src/index.ts"
 compatibility_date = "2026-07-01"
+compatibility_flags = ["nodejs_compat"]
 routes = [
   { pattern = "verify.api.kitsos.net", custom_domain = true }
 ]
@@ -23,3 +24,5 @@ id = "4823ab0d3fd6452e8437631a3717f2b5"
 #   CLERK_PUBLISHABLE_KEY
 #   ADMIN_GROUP_ID
 #   MAIL_API_KEY       (kitsos_... key for mail.api.kitsos.net, scope mail:send)
+#   AXIOM_TOKEN
+#   AXIOM_DATASET
