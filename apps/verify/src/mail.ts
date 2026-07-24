@@ -1,12 +1,13 @@
 import type { Env } from "./env";
 
+const DEFAULT_FROM_ADDRESS = "verify@kitsos.net";
+
 /**
- * Sends the magic-link verification email via mail.api.kitsos.net.
- *
- * NOTE: endpoint path / payload shape here is a best guess based on
- * the mail API's general design (scoped API keys, template-based
- * sending) — confirm against the actual mail.api.kitsos.net OpenAPI
- * spec once it exists (see [[kitsos-mail-api]]) and adjust.
+ * Sends the magic-link verification email via mail.api.kitsos.net,
+ * which forwards to Brevo internally — this worker never talks to
+ * Brevo directly. Requires `MAIL_API_KEY` to be a kitsos_... key with
+ * `mail:send` scope, and `env.MAIL_FROM_ADDRESS` (or the default
+ * below) to have a resource_grant for that scope in mail's D1.
  */
 export async function sendMagicLinkEmail(
   env: Env,
@@ -22,9 +23,11 @@ export async function sendMagicLinkEmail(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        to,
+        from: env.MAIL_FROM_ADDRESS || DEFAULT_FROM_ADDRESS,
+        to: [to],
+        subject: "Kitsos — Bestätige deine Verifizierung",
         template: "resource-verification",
-        variables: {
+        data: {
           resource: resourceValue,
           confirm_url: confirmUrl,
         },
