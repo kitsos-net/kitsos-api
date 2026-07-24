@@ -49,20 +49,44 @@ const API = "https://keys.api.kitsos.net";
 // Each panel: label, GET path (list), POST path + hint for the create form, optional DELETE path builder
 const PANELS = {
   apps:      { label: "Apps",       list: "/admin/apps",       create: "/admin/apps",
-               hint: '{"id":"dns-manager","name":"DNS Manager","environment":"production"}',
+               fields: [
+                 { key: "id", label: "ID (z.B. dns-manager)", type: "text", required: true },
+                 { key: "name", label: "Name", type: "text", required: true },
+                 { key: "description", label: "Beschreibung", type: "text" },
+                 { key: "environment", label: "Environment", type: "select", options: ["production", "staging", "dev"], default: "production" },
+               ],
                del: (row) => `/admin/apps/${row.id}` },
   users:     { label: "Users",      list: "/admin/users",      create: null },
   groups:    { label: "Groups",     list: "/admin/groups",     create: "/admin/groups",
-               hint: '{"name":"admins","description":"..."}',
+               fields: [
+                 { key: "name", label: "Name", type: "text", required: true },
+                 { key: "description", label: "Beschreibung", type: "text" },
+               ],
                del: (row) => `/admin/groups/${row.id}` },
   policies:  { label: "Policies",   list: "/admin/policies",   create: "/admin/policies",
-               hint: '{"appId":"mail","subjectType":"user","subjectId":"user_...","scopes":["mail:send"]}',
+               fields: [
+                 { key: "appId", label: "App ID", type: "text", required: true },
+                 { key: "subjectType", label: "Subject Type", type: "select", options: ["user", "group"], default: "user" },
+                 { key: "subjectId", label: "Subject ID (User- oder Group-ID)", type: "text", required: true },
+                 { key: "scopes", label: "Scopes (Komma-getrennt)", type: "list", required: true },
+               ],
                del: (row) => `/admin/policies/${row.id}` },
   keys:      { label: "API Keys",   list: "/admin/api-keys",   create: "/admin/api-keys",
-               hint: '{"userId":"user_...","appId":"mail","name":"my key","scopes":["mail:send"]}',
+               fields: [
+                 { key: "userId", label: "User ID", type: "text", required: true },
+                 { key: "appId", label: "App ID", type: "text", required: true },
+                 { key: "name", label: "Name (optional)", type: "text" },
+                 { key: "scopes", label: "Scopes (Komma-getrennt)", type: "list", required: true },
+               ],
                del: (row) => `/admin/api-keys/${row.id}` },
   limits:    { label: "Usage Limits", list: "/admin/usage-limits", create: "/admin/usage-limits",
-               hint: '{"userId":"user_...","appId":"mail","limitType":"emails_per_day","limitValue":100,"isOverride":true}' },
+               fields: [
+                 { key: "userId", label: "User ID", type: "text", required: true },
+                 { key: "appId", label: "App ID", type: "text", required: true },
+                 { key: "limitType", label: "Limit Type (z.B. emails_per_day)", type: "text", required: true },
+                 { key: "limitValue", label: "Limit Value", type: "number", required: true },
+                 { key: "isOverride", label: "Ist Override (statt Standard-Limit)", type: "checkbox" },
+               ] },
   requests:  { label: "Increase Requests", list: "/admin/limit-increase-requests?status=pending", create: null },
   audit:     { label: "Audit Log",  list: "/admin/audit-log?limit=100", create: null },
 };
@@ -90,7 +114,50 @@ function renderNav() {
   }
 }
 
-function renderTable(rows) {
+function renderFieldInput(field) {
+  const idAttr = `field_${field.key}`;
+  if (field.type === "select") {
+    const opts = field.options.map(o => `<option value="${o}" ${o === field.default ? "selected" : ""}>${o}</option>`).join("");
+    return `<select id="${idAttr}" style="width:100%;padding:6px;background:#18181b;color:#e4e4e7;border:1px solid #3f3f46;border-radius:6px;margin-bottom:10px">${opts}</select>`;
+  }
+  if (field.type === "checkbox") {
+    return `<label style="display:flex;align-items:center;gap:6px;margin-bottom:10px;font-size:12px"><input type="checkbox" id="${idAttr}" /> ${field.label}</label>`;
+  }
+  const inputType = field.type === "number" ? "number" : "text";
+  return `<input type="${inputType}" id="${idAttr}" placeholder="${field.label}" style="width:100%;padding:6px;background:#18181b;color:#e4e4e7;border:1px solid #3f3f46;border-radius:6px;margin-bottom:10px;box-sizing:border-box" />`;
+}
+
+function renderCreateForm(panel) {
+  let html = `<h3 style="font-size:13px;color:#a1a1aa;margin-top:20px">Neu anlegen</h3>`;
+  for (const field of panel.fields) {
+    if (field.type !== "checkbox") {
+      html += `<label style="display:block;font-size:11px;color:#71717a;margin-bottom:2px">${field.label}${field.required ? " *" : ""}</label>`;
+    }
+    html += renderFieldInput(field);
+  }
+  html += `<button class="action" id="createBtn">Erstellen</button><div class="out" id="createOut"></div>`;
+  return html;
+}
+
+function collectFormValues(panel) {
+  const body = {};
+  for (const field of panel.fields) {
+    const el = document.getElementById(`field_${field.key}`);
+    if (field.type === "checkbox") {
+      body[field.key] = el.checked;
+    } else if (field.type === "number") {
+      body[field.key] = el.value === "" ? undefined : Number(el.value);
+    } else if (field.type === "list") {
+      body[field.key] = el.value.split(",").map(s => s.trim()).filter(Boolean);
+    } else {
+      if (el.value !== "") body[field.key] = el.value;
+    }
+    if (field.required && (body[field.key] === undefined || body[field.key] === "" || (Array.isArray(body[field.key]) && body[field.key].length === 0))) {
+      throw new Error(`Pflichtfeld fehlt: ${field.label}`);
+    }
+  }
+  return body;
+}
   if (!rows || rows.length === 0) return "<p class='hint'>Keine Einträge.</p>";
   const cols = Object.keys(rows[0]);
   const panel = PANELS[activePanel];
@@ -115,13 +182,7 @@ async function render() {
   let html = renderTable(Array.isArray(data) ? data : [data]);
 
   if (panel.create) {
-    html += `
-      <h3 style="font-size:13px;color:#a1a1aa;margin-top:20px">Neu anlegen</h3>
-      <p class="hint">Rohes JSON, wie es der Endpoint erwartet. Beispiel:<br>${panel.hint}</p>
-      <textarea id="createInput">${panel.hint}</textarea>
-      <button class="action" id="createBtn">Erstellen</button>
-      <div class="out" id="createOut"></div>
-    `;
+    html += renderCreateForm(panel);
   }
 
   main.innerHTML = html;
@@ -140,12 +201,11 @@ async function render() {
     createBtn.onclick = async () => {
       const out = document.getElementById("createOut");
       try {
-        const body = document.getElementById("createInput").value;
-        JSON.parse(body); // validate before sending
+        const body = collectFormValues(panel);
         const res = await authedFetch(panel.create, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body,
+          body: JSON.stringify(body),
         });
         const json = await res.json().catch(() => ({}));
         out.textContent = `HTTP ${res.status}: ${JSON.stringify(json)}`;
