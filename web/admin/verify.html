@@ -27,9 +27,12 @@
 
   <h2 style="font-size:13px;color:#a1a1aa">Neue Verifizierung starten</h2>
   <label>App ID</label>
-  <input id="appId" placeholder="mail" />
+  <select id="appId"></select>
   <label>Resource Type</label>
-  <input id="resourceType" placeholder="email_address oder zone" />
+  <select id="resourceType">
+    <option value="email_address">email_address</option>
+    <option value="zone">zone</option>
+  </select>
   <label>Value</label>
   <input id="value" placeholder="dion@kitsos.net oder domain.de" />
   <label>Methode</label>
@@ -47,10 +50,26 @@
         data-clerk-publishable-key="pk_live_Y2xlcmsua2l0c29zLm5ldCQ"></script>
 <script>
 const API = "https://verify.api.kitsos.net";
+const KEYS_API = "https://keys.api.kitsos.net";
 
 async function authedFetch(path, opts = {}) {
   const token = await window.Clerk.session.getToken();
   return fetch(API + path, { ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${token}` } });
+}
+
+async function loadApps() {
+  const token = await window.Clerk.session.getToken();
+  const select = document.getElementById("appId");
+  try {
+    const res = await fetch(KEYS_API + "/admin/apps", { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) throw new Error("not admin or fetch failed");
+    const apps = await res.json();
+    if (!apps.length) throw new Error("no apps");
+    select.innerHTML = apps.map(a => `<option value="${a.id}">${a.id} — ${a.name}</option>`).join("");
+  } catch {
+    // Fallback: free-text if we can't reach keys-api's admin routes (e.g. not an admin)
+    select.outerHTML = `<input id="appId" placeholder="mail" />`;
+  }
 }
 
 async function loadResources() {
@@ -99,6 +118,7 @@ window.addEventListener("load", async () => {
   if (window.Clerk.user) {
     document.getElementById("signin").style.display = "none";
     document.getElementById("app").style.display = "block";
+    loadApps();
     loadResources();
   } else {
     window.Clerk.mountSignIn(document.getElementById("clerk-signin"));
