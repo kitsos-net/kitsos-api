@@ -158,6 +158,8 @@ function collectFormValues(panel) {
   }
   return body;
 }
+
+function renderTable(rows) {
   if (!rows || rows.length === 0) return "<p class='hint'>Keine Einträge.</p>";
   const cols = Object.keys(rows[0]);
   const panel = PANELS[activePanel];
