@@ -1,0 +1,206 @@
+openapi: 3.0.3
+info:
+  title: Kitsos Mail API
+  description: >
+    Email sending — manual or template-based (POST /send), plus
+    user-managed webhooks with dot-notation payload → template
+    variable mapping. Webhook triggers are public, gated by a
+    per-webhook secret header rather than @kitsos/auth.
+  version: "0.1.0"
+servers:
+  - url: https://mail.api.kitsos.net
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: kitsos_... API key with the mail:send or mail:manage scope, validated by @kitsos/auth.
+    webhookSecret:
+      type: apiKey
+      in: header
+      name: X-Webhook-Secret
+      description: Per-webhook secret, returned once at webhook creation.
+  schemas:
+    Template:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        url: { type: string, description: "HTML fetched from here at send time, cached 1h" }
+        variables: { type: array, items: { type: string } }
+    Webhook:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        template_id: { type: string }
+        from_address: { type: string }
+        to_addresses: { type: array, items: { type: string } }
+        mapping: { type: object, additionalProperties: { type: string } }
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        "200": { description: OK }
+
+  /send:
+    post:
+      summary: Send an email, manually or via a saved template
+      security: [{ apiKey: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from, to, subject]
+              properties:
+                from: { type: string, description: "Must be a granted resource_type=email_address for this key's user" }
+                to: { type: array, items: { type: string } }
+                subject: { type: string }
+                template: { type: string, description: "Template id — if set, html/text are ignored and rendered from the template instead" }
+                data: { type: object, additionalProperties: { type: string } }
+                html: { type: string }
+                text: { type: string }
+      responses:
+        "200": { description: Sent }
+        "403":
+          description: from address not granted, or daily limit exceeded
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  /webhook/{webhookId}:
+    post:
+      summary: Trigger a webhook — renders its template with the mapped payload and sends
+      security: [{ webhookSecret: [] }]
+      parameters:
+        - { name: webhookId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        description: Arbitrary JSON payload, resolved against the webhook's dot-notation mapping
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200": { description: Sent }
+        "401":
+          description: Missing or invalid X-Webhook-Secret
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        "429":
+          description: Daily email limit exceeded for this webhook's owner
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  /templates:
+    get:
+      summary: List your own templates
+      security: [{ apiKey: [] }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Template' } } } } }
+    post:
+      summary: Create a template
+      security: [{ apiKey: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, url, variables]
+              properties:
+                name: { type: string }
+                url: { type: string }
+                variables: { type: array, items: { type: string } }
+      responses:
+        "201": { description: Created }
+
+  /templates/{templateId}:
+    patch:
+      summary: Update a template's URL or variables (invalidates the 1h HTML cache)
+      security: [{ apiKey: [] }]
+      parameters:
+        - { name: templateId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                url: { type: string }
+                variables: { type: array, items: { type: string } }
+      responses:
+        "204": { description: No Content }
+    delete:
+      summary: Delete a template
+      security: [{ apiKey: [] }]
+      parameters:
+        - { name: templateId, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: No Content }
+
+  /webhooks:
+    get:
+      summary: List your own webhooks (secret never included)
+      security: [{ apiKey: [] }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Webhook' } } } } }
+    post:
+      summary: Create a webhook (returns the secret once)
+      security: [{ apiKey: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, templateId, fromAddress, toAddresses, mapping]
+              properties:
+                name: { type: string }
+                templateId: { type: string }
+                fromAddress: { type: string, description: "Must be a granted resource_type=email_address" }
+                toAddresses: { type: array, items: { type: string } }
+                mapping: { type: object, additionalProperties: { type: string }, description: "{templateVar: 'dot.path.in.payload'}" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  secret: { type: string, description: "shown only here" }
+                  url: { type: string }
+        "403":
+          description: fromAddress not granted, or webhook limit exceeded
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  /webhooks/{webhookId}:
+    patch:
+      summary: Update a webhook's template, addresses, or mapping
+      security: [{ apiKey: [] }]
+      parameters:
+        - { name: webhookId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                templateId: { type: string }
+                fromAddress: { type: string }
+                toAddresses: { type: array, items: { type: string } }
+                mapping: { type: object, additionalProperties: { type: string } }
+      responses:
+        "204": { description: No Content }
+    delete:
+      summary: Delete a webhook
+      security: [{ apiKey: [] }]
+      parameters:
+        - { name: webhookId, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: No Content }
