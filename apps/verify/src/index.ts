@@ -80,33 +80,65 @@ resources.get("/", async (c) => {
 });
 
 // Register a resource + start a verification attempt
+const VALID_METHODS = ["dns_txt", "magic_link"];
+
 resources.post("/", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json<{
-    appId: string;
-    resourceType: string;
-    value: string;
-    method: "dns_txt" | "magic_link";
-    scopes: string[];
-  }>();
+    appId?: string;
+    resourceType?: string;
+    value?: string;
+    method?: string;
+    scopes?: string[];
+  }>().catch(() => null);
 
-  const resourceId = await findOrCreateResource(c.env, body.appId, body.resourceType, body.value);
+  if (!body) return c.json({ error: "invalid-json-body" }, 400);
+
+  const missing = ["appId", "resourceType", "value", "method"].filter(
+    (k) => !body[k as keyof typeof body]
+  );
+  if (missing.length > 0) {
+    return c.json({ error: "missing-fields", fields: missing }, 400);
+  }
+  if (!VALID_METHODS.includes(body.method!)) {
+    return c.json({ error: "invalid-method", allowed: VALID_METHODS }, 400);
+  }
+  if (!Array.isArray(body.scopes) || body.scopes.length === 0) {
+    return c.json({ error: "missing-scopes" }, 400);
+  }
+
+  const appExists = await c.env.DB.prepare("SELECT 1 FROM apps WHERE id = ?")
+    .bind(body.appId)
+    .first();
+  if (!appExists) {
+    return c.json({ error: "app-not-found", appId: body.appId, hint: "Create the app first via keys-api /admin/apps" }, 404);
+  }
+
+  const method = body.method as "dns_txt" | "magic_link";
+
+  let resourceId: string;
+  let verificationId: string;
   const token = generateVerificationToken();
-  const verificationId = id();
+  verificationId = id();
 
-  await c.env.DB.prepare(
-    `INSERT INTO resource_verifications (id, resource_id, user_id, method, token, pending_scopes)
-     VALUES (?, ?, ?, ?, ?, ?)`
-  )
-    .bind(verificationId, resourceId, userId, body.method, token, JSON.stringify(body.scopes))
-    .run();
+  try {
+    resourceId = await findOrCreateResource(c.env, body.appId!, body.resourceType!, body.value!);
+    await c.env.DB.prepare(
+      `INSERT INTO resource_verifications (id, resource_id, user_id, method, token, pending_scopes)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    )
+      .bind(verificationId, resourceId, userId, method, token, JSON.stringify(body.scopes))
+      .run();
+  } catch (e) {
+    return c.json({ error: "database-error", detail: String(e) }, 500);
+  }
 
-  if (body.method === "dns_txt") {
+  if (method === "dns_txt") {
     return c.json({
       resourceId,
       verificationId,
       instructions: {
-        record: verificationRecordName(body.value),
+        record: verificationRecordName(body.value!),
         type: "TXT",
         value: token,
       },
@@ -117,10 +149,22 @@ resources.post("/", async (c) => {
   const user = await c.env.DB.prepare("SELECT email FROM users WHERE id = ?")
     .bind(userId)
     .first<{ email: string }>();
-  const confirmUrl = `https://verify.api.kitsos.net/resources/${resourceId}/confirm?token=${token}`;
-  const sent = user ? await sendMagicLinkEmail(c.env, user.email, confirmUrl, body.value) : false;
 
-  return c.json({ resourceId, verificationId, emailSent: sent }, 201);
+  if (!user?.email) {
+    return c.json({
+      resourceId, verificationId,
+      emailSent: false, emailError: "no-user-email-on-file",
+    }, 201);
+  }
+
+  const confirmUrl = `https://verify.api.kitsos.net/resources/${resourceId}/confirm?token=${token}`;
+  const result = await sendMagicLinkEmail(c.env, user.email, confirmUrl, body.value!);
+
+  return c.json({
+    resourceId, verificationId,
+    emailSent: result.ok,
+    emailError: result.ok ? undefined : result.error,
+  }, 201);
 });
 
 // Check a pending DNS-TXT verification

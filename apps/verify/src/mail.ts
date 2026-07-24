@@ -13,7 +13,7 @@ export async function sendMagicLinkEmail(
   to: string,
   confirmUrl: string,
   resourceValue: string
-): Promise<boolean> {
+): Promise<{ ok: boolean; error?: string }> {
   try {
     const res = await fetch("https://mail.api.kitsos.net/send", {
       method: "POST",
@@ -30,8 +30,10 @@ export async function sendMagicLinkEmail(
         },
       }),
     });
-    return res.ok;
-  } catch {
-    return false;
+    if (res.ok) return { ok: true };
+    const body = await res.text().catch(() => "");
+    return { ok: false, error: `mail-api ${res.status}: ${body.slice(0, 200)}` };
+  } catch (e) {
+    return { ok: false, error: `fetch-failed: ${String(e)}` };
   }
 }
