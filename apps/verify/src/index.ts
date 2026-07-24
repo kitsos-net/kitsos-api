@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { withTelemetry } from "@kitsos/telemetry";
 import { requireUser, requireAdmin } from "./middleware";
 import { lookupTxtRecords, verificationRecordName, generateVerificationToken } from "./dns";
@@ -7,6 +8,12 @@ import type { Env } from "./env";
 
 type Vars = { userId: string };
 const app = new Hono<{ Bindings: Env; Variables: Vars }>();
+
+app.use("*", cors({
+  origin: "*",
+  allowHeaders: ["Authorization", "Content-Type"],
+  allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+}));
 
 const DNS_REVERIFY_DAYS = 30;
 const DNS_GRACE_DAYS = 7;
