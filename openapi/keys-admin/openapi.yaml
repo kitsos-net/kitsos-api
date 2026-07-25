@@ -1,0 +1,87 @@
+openapi: 3.0.3
+info:
+  title: Kitsos Keys Admin API
+  description: Administrative API for managing the Kitsos platform. Every endpoint except the health check requires an administrator Clerk session.
+  version: "0.1.0"
+servers:
+  - url: https://keys.api.kitsos.net
+tags:
+  - name: Default
+    description: Service availability.
+  - name: Admin
+    description: Administrative platform management.
+components:
+  securitySchemes:
+    clerkSession:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Clerk session JWT for a member of the admin group.
+  schemas:
+    App: { type: object, properties: { id: { type: string }, name: { type: string }, description: { type: string, nullable: true }, environment: { type: string, enum: [production, staging, dev] }, created_at: { type: integer } } }
+    Group: { type: object, properties: { id: { type: string }, name: { type: string }, description: { type: string, nullable: true } } }
+    Policy: { type: object, properties: { id: { type: string }, appId: { type: string }, subjectType: { type: string, enum: [user, group] }, subjectId: { type: string }, scopes: { type: array, items: { type: string } } } }
+    ApiKey: { type: object, properties: { id: { type: string }, user_id: { type: string }, app_id: { type: string }, name: { type: string, nullable: true }, status: { type: string, enum: [active, revoked, expired] }, scopes: { type: array, items: { type: string } }, expires_at: { type: integer, nullable: true }, last_used_at: { type: integer, nullable: true }, created_at: { type: integer } } }
+    ApiKeyCreated:
+      allOf:
+        - $ref: '#/components/schemas/ApiKey'
+        - type: object
+          properties: { key: { type: string, description: Raw API key — shown only once, at creation time. } }
+    LimitIncreaseRequest: { type: object, properties: { id: { type: string }, user_id: { type: string }, app_id: { type: string }, limit_type: { type: string }, requested_value: { type: integer }, reason: { type: string, nullable: true }, status: { type: string, enum: [pending, approved, denied] } } }
+    AuditLogEntry: { type: object, properties: { id: { type: string }, user_id: { type: string, nullable: true }, app_id: { type: string, nullable: true }, action: { type: string }, result: { type: string, enum: [allowed, denied] }, reason: { type: string, nullable: true }, created_at: { type: integer } } }
+security:
+  - clerkSession: []
+paths:
+  /health:
+    get:
+      tags: [Default]
+      summary: Health check
+      security: []
+      responses: { "200": { description: OK } }
+  /admin/apps:
+    get: { tags: [Admin], summary: List all apps, responses: { "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/App' } } } } } } }
+    post:
+      tags: [Admin]
+      summary: Create an app
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [id, name], properties: { id: { type: string }, name: { type: string }, description: { type: string }, environment: { type: string } } } } } }
+      responses: { "201": { description: Created } }
+  /admin/apps/{appId}:
+    delete: { tags: [Admin], summary: Delete an app, parameters: [{ name: appId, in: path, required: true, schema: { type: string } }], responses: { "204": { description: No Content } } }
+  /admin/apps/{appId}/scopes:
+    post: { tags: [Admin], summary: Add a scope to an app, parameters: [{ name: appId, in: path, required: true, schema: { type: string } }], requestBody: { required: true, content: { application/json: { schema: { type: object, required: [scope], properties: { scope: { type: string }, description: { type: string } } } } } }, responses: { "201": { description: Created } } }
+  /admin/apps/{appId}/scopes/{scope}:
+    delete: { tags: [Admin], summary: Remove a scope from an app, parameters: [{ name: appId, in: path, required: true, schema: { type: string } }, { name: scope, in: path, required: true, schema: { type: string } }], responses: { "204": { description: No Content } } }
+  /admin/users:
+    get: { tags: [Admin], summary: List all users, responses: { "200": { description: OK } } }
+  /admin/users/{userId}:
+    patch: { tags: [Admin], summary: Update a user's status, parameters: [{ name: userId, in: path, required: true, schema: { type: string } }], requestBody: { required: true, content: { application/json: { schema: { type: object, required: [status], properties: { status: { type: string, enum: [active, deactivated, pending_deletion, deleted] } } } } } }, responses: { "204": { description: No Content } } }
+  /admin/groups:
+    get: { tags: [Admin], summary: List all groups, responses: { "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Group' } } } } } } }
+    post: { tags: [Admin], summary: Create a group, requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name], properties: { name: { type: string }, description: { type: string } } } } } }, responses: { "201": { description: Created } } }
+  /admin/groups/{groupId}:
+    delete: { tags: [Admin], summary: Delete a group, parameters: [{ name: groupId, in: path, required: true, schema: { type: string } }], responses: { "204": { description: No Content } } }
+  /admin/groups/{groupId}/members:
+    post: { tags: [Admin], summary: Add a user to a group, parameters: [{ name: groupId, in: path, required: true, schema: { type: string } }], requestBody: { required: true, content: { application/json: { schema: { type: object, required: [userId], properties: { userId: { type: string } } } } } }, responses: { "204": { description: No Content } } }
+  /admin/groups/{groupId}/members/{userId}:
+    delete: { tags: [Admin], summary: Remove a user from a group, parameters: [{ name: groupId, in: path, required: true, schema: { type: string } }, { name: userId, in: path, required: true, schema: { type: string } }], responses: { "204": { description: No Content } } }
+  /admin/policies:
+    get: { tags: [Admin], summary: List policies, parameters: [{ name: appId, in: query, schema: { type: string } }], responses: { "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Policy' } } } } } } }
+    post: { tags: [Admin], summary: Create a policy, requestBody: { required: true, content: { application/json: { schema: { type: object, required: [appId, subjectType, subjectId, scopes], properties: { appId: { type: string }, subjectType: { type: string, enum: [user, group] }, subjectId: { type: string }, scopes: { type: array, items: { type: string } } } } } } }, responses: { "201": { description: Created } } }
+  /admin/policies/{policyId}:
+    delete: { tags: [Admin], summary: Delete a policy, parameters: [{ name: policyId, in: path, required: true, schema: { type: string } }], responses: { "204": { description: No Content } } }
+  /admin/api-keys:
+    get: { tags: [Admin], summary: List API keys (any user), parameters: [{ name: userId, in: query, schema: { type: string } }], responses: { "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/ApiKey' } } } } } } }
+    post: { tags: [Admin], summary: Create an API key for any user, requestBody: { required: true, content: { application/json: { schema: { type: object, required: [userId, appId, scopes], properties: { userId: { type: string }, appId: { type: string }, name: { type: string }, scopes: { type: array, items: { type: string } }, expiresAt: { type: integer } } } } } }, responses: { "201": { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/ApiKeyCreated' } } } } } }
+  /admin/api-keys/{keyId}:
+    delete: { tags: [Admin], summary: Revoke an API key, parameters: [{ name: keyId, in: path, required: true, schema: { type: string } }], responses: { "204": { description: No Content } } }
+  /admin/usage-limits:
+    get: { tags: [Admin], summary: List usage limits, parameters: [{ name: userId, in: query, schema: { type: string } }], responses: { "200": { description: OK } } }
+    post: { tags: [Admin], summary: Set a usage limit, requestBody: { required: true, content: { application/json: { schema: { type: object, required: [userId, appId, limitType, limitValue], properties: { userId: { type: string }, appId: { type: string }, limitType: { type: string }, limitValue: { type: integer }, isOverride: { type: boolean } } } } } }, responses: { "201": { description: Created } } }
+  /admin/limit-increase-requests:
+    get: { tags: [Admin], summary: List limit increase requests, parameters: [{ name: status, in: query, schema: { type: string, default: pending } }], responses: { "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/LimitIncreaseRequest' } } } } } } }
+  /admin/limit-increase-requests/{reqId}/approve:
+    post: { tags: [Admin], summary: Approve a limit increase request (creates the usage_limits override), parameters: [{ name: reqId, in: path, required: true, schema: { type: string } }], responses: { "204": { description: No Content } } }
+  /admin/limit-increase-requests/{reqId}/deny:
+    post: { tags: [Admin], summary: Deny a limit increase request, parameters: [{ name: reqId, in: path, required: true, schema: { type: string } }], responses: { "204": { description: No Content } } }
+  /admin/audit-log:
+    get: { tags: [Admin], summary: List audit log entries, parameters: [{ name: userId, in: query, schema: { type: string } }, { name: limit, in: query, schema: { type: integer, default: 100, maximum: 500 } }], responses: { "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/AuditLogEntry' } } } } } } }

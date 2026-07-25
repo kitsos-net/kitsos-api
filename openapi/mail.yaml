@@ -9,6 +9,10 @@ info:
   version: "0.1.0"
 servers:
   - url: https://mail.api.kitsos.net
+tags:
+  - name: Default
+  - name: User
+  - name: Webhooks
 
 components:
   securitySchemes:
@@ -46,12 +50,14 @@ components:
 paths:
   /health:
     get:
+      tags: [Default]
       summary: Health check
       responses:
         "200": { description: OK }
 
   /send:
     post:
+      tags: [User]
       summary: Send an email, manually or via a saved template
       security: [{ apiKey: [] }]
       requestBody:
@@ -77,6 +83,7 @@ paths:
 
   /webhook/{webhookId}:
     post:
+      tags: [Webhooks]
       summary: Trigger a webhook — renders its template with the mapped payload and sends
       security: [{ webhookSecret: [] }]
       parameters:
@@ -97,11 +104,13 @@ paths:
 
   /templates:
     get:
+      tags: [User]
       summary: List your own templates
       security: [{ apiKey: [] }]
       responses:
         "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Template' } } } } }
     post:
+      tags: [User]
       summary: Create a template
       security: [{ apiKey: [] }]
       requestBody:
@@ -120,6 +129,7 @@ paths:
 
   /templates/{templateId}:
     patch:
+      tags: [User]
       summary: Update a template's URL or variables (invalidates the 1h HTML cache)
       security: [{ apiKey: [] }]
       parameters:
@@ -135,6 +145,7 @@ paths:
       responses:
         "204": { description: No Content }
     delete:
+      tags: [User]
       summary: Delete a template
       security: [{ apiKey: [] }]
       parameters:
@@ -144,11 +155,13 @@ paths:
 
   /webhooks:
     get:
+      tags: [User]
       summary: List your own webhooks (secret never included)
       security: [{ apiKey: [] }]
       responses:
         "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Webhook' } } } } }
     post:
+      tags: [User]
       summary: Create a webhook (returns the secret once)
       security: [{ apiKey: [] }]
       requestBody:
@@ -181,6 +194,7 @@ paths:
 
   /webhooks/{webhookId}:
     patch:
+      tags: [User]
       summary: Update a webhook's template, addresses, or mapping
       security: [{ apiKey: [] }]
       parameters:
@@ -198,6 +212,7 @@ paths:
       responses:
         "204": { description: No Content }
     delete:
+      tags: [User]
       summary: Delete a webhook
       security: [{ apiKey: [] }]
       parameters:

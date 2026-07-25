@@ -10,6 +10,10 @@ info:
   version: "0.1.0"
 servers:
   - url: https://verify.api.kitsos.net
+tags:
+  - name: Default
+  - name: User
+  - name: Admin
 
 components:
   securitySchemes:
@@ -40,6 +44,7 @@ security:
 paths:
   /health:
     get:
+      tags: [Default]
       summary: Health check
       security: []
       responses:
@@ -47,6 +52,7 @@ paths:
 
   /resources:
     get:
+      tags: [User]
       summary: List your own resources and their verification status
       responses:
         "200":
@@ -55,6 +61,7 @@ paths:
             application/json:
               schema: { type: array, items: { $ref: '#/components/schemas/ResourceVerification' } }
     post:
+      tags: [User]
       summary: Register a resource and start a verification attempt
       requestBody:
         required: true
@@ -92,6 +99,7 @@ paths:
 
   /resources/{resourceId}/check-dns:
     post:
+      tags: [User]
       summary: Check a pending DNS-TXT verification via Cloudflare DoH; creates the resource_grants row on success
       parameters:
         - { name: resourceId, in: path, required: true, schema: { type: string } }
@@ -112,6 +120,7 @@ paths:
 
   /resources/{resourceId}/confirm:
     get:
+      tags: [Default]
       summary: Confirm a magic-link verification (public — the token itself is the credential, no Clerk session required)
       security: []
       parameters:
@@ -126,12 +135,14 @@ paths:
 
   /admin/resources:
     get:
+      tags: [Admin]
       summary: List all resources across all users (admin only)
       responses:
         "200": { description: OK }
 
   /admin/resources/{resourceId}:
     delete:
+      tags: [Admin]
       summary: Delete a resource and its verifications/grants (admin only)
       parameters:
         - { name: resourceId, in: path, required: true, schema: { type: string } }

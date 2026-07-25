@@ -10,6 +10,8 @@ servers:
   - url: https://hme.api.kitsos.net
 
 tags:
+  - name: Default
+    description: Service availability.
   - name: Aliases
     description: Manage your Hide My Email forwarding aliases.
 
@@ -124,6 +126,7 @@ security:
 paths:
   /health:
     get:
+      tags: [Default]
       summary: Health check
       security: []
       responses:
