@@ -28,11 +28,15 @@ function daysFromNow(days: number): number {
   return Math.floor(Date.now() / 1000) + days * 86400;
 }
 
-async function findOrCreateResource(env: Env, appId: string, resourceType: string, value: string) {
+async function findOrCreateResource(env: Env, userId: string, appId: string, resourceType: string, value: string) {
   const existing = await env.DB.prepare(
-    "SELECT id FROM resources WHERE app_id = ? AND resource_type = ? AND value = ?"
+    `SELECT r.id FROM resources r
+     LEFT JOIN resource_verifications rv ON rv.resource_id = r.id AND rv.user_id = ?
+     WHERE r.resource_type = ? AND r.value = ?
+     ORDER BY CASE WHEN rv.verified_at IS NOT NULL THEN 0 ELSE 1 END, r.created_at ASC
+     LIMIT 1`
   )
-    .bind(appId, resourceType, value)
+    .bind(userId, resourceType, value)
     .first<{ id: string }>();
   if (existing) return existing.id;
 
@@ -49,14 +53,32 @@ async function grantAccess(
   env: Env,
   resourceId: string,
   userId: string,
-  verificationId: string,
   scopes: string[]
 ) {
+  const existing = await env.DB.prepare(
+    "SELECT id, scopes FROM resource_grants WHERE resource_id = ? AND user_id = ? ORDER BY created_at ASC"
+  ).bind(resourceId, userId).all<{ id: string; scopes: string }>();
+  const mergedScopes = [...new Set([...existing.results.flatMap((grant) => JSON.parse(grant.scopes) as string[]), ...scopes])];
+  if (existing.results.length > 0) {
+    await env.DB.prepare("UPDATE resource_grants SET scopes = ? WHERE id = ?")
+      .bind(JSON.stringify(mergedScopes), existing.results[0].id).run();
+    return mergedScopes;
+  }
   await env.DB.prepare(
     "INSERT INTO resource_grants (id, resource_id, user_id, scopes) VALUES (?, ?, ?, ?)"
   )
-    .bind(id(), resourceId, userId, JSON.stringify(scopes))
+    .bind(id(), resourceId, userId, JSON.stringify(mergedScopes))
     .run();
+  return mergedScopes;
+}
+
+async function hasActiveVerification(env: Env, resourceId: string, userId: string) {
+  const verification = await env.DB.prepare(
+    `SELECT grace_expires_at FROM resource_verifications
+     WHERE resource_id = ? AND user_id = ? AND verified_at IS NOT NULL
+     ORDER BY verified_at DESC LIMIT 1`
+  ).bind(resourceId, userId).first<{ grace_expires_at: number | null }>();
+  return Boolean(verification && (!verification.grace_expires_at || verification.grace_expires_at >= Math.floor(Date.now() / 1000)));
 }
 
 async function canVerifyResource(env: Env, userId: string, resourceId: string): Promise<boolean> {
@@ -148,7 +170,11 @@ resources.post("/", async (c) => {
   verificationId = id();
 
   try {
-    resourceId = await findOrCreateResource(c.env, body.appId!, body.resourceType!, body.value!);
+    resourceId = await findOrCreateResource(c.env, userId, body.appId!, body.resourceType!, body.value!);
+    if (await hasActiveVerification(c.env, resourceId, userId)) {
+      const scopes = await grantAccess(c.env, resourceId, userId, body.scopes);
+      return c.json({ resourceId, alreadyVerified: true, scopes }, 200);
+    }
     await c.env.DB.prepare(
       `INSERT INTO resource_verifications (id, resource_id, user_id, method, token, pending_scopes)
        VALUES (?, ?, ?, ?, ?, ?)`
@@ -227,7 +253,7 @@ resources.post("/:resourceId/check-dns", async (c) => {
     .bind(daysFromNow(DNS_REVERIFY_DAYS), daysFromNow(DNS_REVERIFY_DAYS + DNS_GRACE_DAYS), verification.id)
     .run();
 
-  await grantAccess(c.env, resourceId, userId, verification.id, JSON.parse(verification.pending_scopes));
+  await grantAccess(c.env, resourceId, userId, JSON.parse(verification.pending_scopes));
 
   return c.json({ verified: true });
 });
@@ -263,7 +289,7 @@ resources.get("/:resourceId/confirm", async (c) => {
     )
     .run();
 
-  await grantAccess(c.env, resourceId, verification.user_id, verification.id, JSON.parse(verification.pending_scopes));
+  await grantAccess(c.env, resourceId, verification.user_id, JSON.parse(verification.pending_scopes));
 
   return c.json({ verified: true });
 });

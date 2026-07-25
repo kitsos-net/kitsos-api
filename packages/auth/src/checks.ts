@@ -125,33 +125,25 @@ export async function checkResourceGrant(
   value: string,
   scope: string
 ): Promise<CheckResult> {
-  const resource = await env.DB.prepare(
-    `SELECT id FROM resources WHERE app_id = ? AND resource_type = ? AND value = ?`
-  )
-    .bind(context.appId, resourceType, value)
-    .first<{ id: string }>();
-
-  if (!resource) return { allowed: false, status: 403, reason: "resource-not-found" };
-
-  const grant = await env.DB.prepare(
-    `SELECT rg.scopes, rv.grace_expires_at
-     FROM resource_grants rg
-     JOIN resource_verifications rv ON rv.resource_id = rg.resource_id AND rv.user_id = rg.user_id
-     WHERE rg.resource_id = ? AND rg.user_id = ?
-     ORDER BY rv.verified_at DESC LIMIT 1`
-  )
-    .bind(resource.id, context.userId)
-    .first<{ scopes: string; grace_expires_at: number | null }>();
-
-  if (!grant) return { allowed: false, status: 403, reason: "resource-not-granted" };
-
   const now = Date.now() / 1000;
-  if (grant.grace_expires_at && grant.grace_expires_at < now) {
-    return { allowed: false, status: 403, reason: "resource-verification-expired" };
-  }
+  // Resource ownership is platform-wide. A domain or email verified once can
+  // be granted further API scopes without issuing another challenge.
+  const grants = await env.DB.prepare(
+    `SELECT rg.scopes
+     FROM resources r
+     JOIN resource_grants rg ON rg.resource_id = r.id AND rg.user_id = ?
+     JOIN resource_verifications rv ON rv.resource_id = r.id AND rv.user_id = rg.user_id
+     WHERE r.resource_type = ? AND r.value = ?
+       AND rv.verified_at IS NOT NULL
+       AND (rv.grace_expires_at IS NULL OR rv.grace_expires_at >= ?)`
+  )
+    .bind(context.userId, resourceType, value, now)
+    .all<{ scopes: string }>();
 
-  const scopes: string[] = JSON.parse(grant.scopes);
-  if (!scopes.includes(scope)) {
+  if (grants.results.length === 0) return { allowed: false, status: 403, reason: "resource-not-granted" };
+
+  const grantedScopes = new Set(grants.results.flatMap((grant) => JSON.parse(grant.scopes) as string[]));
+  if (!grantedScopes.has(scope)) {
     return { allowed: false, status: 403, reason: "resource-scope-missing" };
   }
 
