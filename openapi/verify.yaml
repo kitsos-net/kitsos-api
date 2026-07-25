@@ -129,6 +129,19 @@ paths:
                       type: { type: string, enum: [TXT] }
                       value: { type: string }
                   emailSent: { type: boolean, nullable: true }
+        "429":
+          description: Magic-link email budget of 15 per UTC day is exhausted
+
+  /resources/{resourceId}:
+    delete:
+      summary: Remove your own verified ownership claim and its grants
+      parameters:
+        - { name: resourceId, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Ownership claim removed }
+        "404":
+          description: No verified ownership claim belonging to the caller
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
 
   /resources/{resourceId}/check-dns:
     post:

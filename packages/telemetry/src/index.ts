@@ -28,6 +28,8 @@ export function withTelemetry<Env extends TelemetryEnv>(
       },
     },
     service: { name: serviceName },
+    // Request statistics must be exact rather than extrapolated from a sample.
+    sampling: { headSampler: { ratio: 1 } },
   });
 
   return instrument(handler, config);

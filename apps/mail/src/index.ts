@@ -10,6 +10,8 @@ import type { Env } from "./env";
 const APP_ID = "mail";
 const VERIFICATION_FROM_ADDRESS = "noreply@notify.kitsos.net";
 const VERIFICATION_SCOPE = "mail:send:verification";
+const VERIFICATION_TEMPLATE_URL = "https://cdn.kitsos.net/api/mail/templates/verify-email.html";
+const VERIFICATION_TEMPLATE_ID = "system:verify-email";
 
 type Vars = { userId: string };
 const app = new Hono<{ Bindings: Env; Variables: Vars }>();
@@ -131,13 +133,21 @@ app.post("/internal/verification-email", async (c) => {
   );
   if (!grant.allowed) return c.json({ error: grant.reason }, grant.status as 403);
 
-  const resource = escapeHtml(body.resource);
-  const url = escapeHtml(confirmUrl.toString());
+  let html: string;
+  try {
+    html = renderTemplate(
+      await getTemplateHtml(c.env, VERIFICATION_TEMPLATE_ID, VERIFICATION_TEMPLATE_URL),
+      { resource: escapeHtml(body.resource), confirm_url: escapeHtml(confirmUrl.toString()) }
+    );
+  } catch (e) {
+    return c.json({ error: "template-fetch-failed", detail: String(e) }, 502);
+  }
+
   const result = await sendViaBrevo(c.env, {
     from: VERIFICATION_FROM_ADDRESS,
     to: [body.to],
     subject: "Kitsos — Bestätige deine Verifizierung",
-    html: `<p>Bestätige die Verifizierung für <strong>${resource}</strong>.</p><p><a href="${url}">Verifizierung bestätigen</a></p>`,
+    html,
     text: `Bestätige die Verifizierung für ${body.resource}: ${confirmUrl}`,
   });
   if (!result.ok) return c.json({ error: "send-failed", detail: result.error }, 502);

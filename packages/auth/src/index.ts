@@ -1,5 +1,6 @@
 import type { Env, AuthContext, CheckResult, RateLimitOptions } from "./types";
 import { verifyClerkSession, ensureUserRow } from "./clerk";
+import { annotateAuthenticatedRequest } from "./telemetry";
 import {
   validateApiKey,
   checkScope,
@@ -62,6 +63,7 @@ export async function authenticateApiKey(
 
   const context = await validateApiKey(token, appId, env);
   if (!context) return { allowed: false, status: 401, reason: "invalid-credentials" };
+  annotateAuthenticatedRequest(context, appId, requiredScope);
 
   const scopeCheck = checkScope(context, requiredScope);
   if (!scopeCheck.allowed) {
@@ -148,6 +150,7 @@ export async function authenticate(
   if (!context) {
     return { allowed: false, status: 401, reason: "invalid-credentials" };
   }
+  annotateAuthenticatedRequest(context, appId, requiredScope);
 
   const scopeCheck = checkScope(context, requiredScope);
   if (!scopeCheck.allowed) {

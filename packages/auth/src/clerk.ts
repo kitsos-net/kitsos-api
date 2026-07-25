@@ -1,5 +1,6 @@
 import { createClerkClient, verifyToken } from "@clerk/backend";
 import type { Env } from "./types";
+import { annotateSessionRequest } from "./telemetry";
 
 /**
  * Verifies a Clerk session JWT (from Authorization: Bearer <token> or
@@ -16,6 +17,7 @@ export async function verifyClerkSession(
       secretKey: env.CLERK_SECRET_KEY,
     });
     if (!payload?.sub) return null;
+    annotateSessionRequest(payload.sub);
     return { userId: payload.sub };
   } catch {
     return null;
