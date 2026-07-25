@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { authenticateApiKey, checkResourceGrant } from "@kitsos/auth";
+import { authenticateApiKey, checkResourceGrant, getUsageLimit, withRetryAfter } from "@kitsos/auth";
 import { withTelemetry } from "@kitsos/telemetry";
 import { generateAlias } from "./alias";
 import type { Env } from "./env";
@@ -24,8 +24,8 @@ function id() {
 app.get("/health", (c) => c.json({ ok: true }));
 
 app.get("/aliases", async (c) => {
-  const auth = await authenticateApiKey(c.req.raw, c.env, "hme:manage", APP_ID);
-  if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
+  const auth = await authenticateApiKey(c.req.raw, c.env, "hme:read", APP_ID);
+  if (!auth.allowed) return withRetryAfter(c.json({ error: auth.reason }, auth.status as 401 | 403 | 429), auth);
   const r = await c.env.DB.prepare(
     "SELECT id, alias, domain, forward_to, label, status, emails_forwarded, last_forwarded_at, created_at FROM hme_aliases WHERE user_id = ? ORDER BY created_at DESC"
   )
@@ -35,14 +35,18 @@ app.get("/aliases", async (c) => {
 });
 
 app.post("/aliases", async (c) => {
-  const auth = await authenticateApiKey(c.req.raw, c.env, "hme:manage", APP_ID);
-  if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
+  const auth = await authenticateApiKey(c.req.raw, c.env, "hme:create", APP_ID);
+  if (!auth.allowed) return withRetryAfter(c.json({ error: auth.reason }, auth.status as 401 | 403 | 429), auth);
   const ctx = auth.context!;
 
   const body = await c.req.json<{ forwardTo: string; label?: string }>();
 
   const grant = await checkResourceGrant(c.env, ctx, "email_address", body.forwardTo, "hme:receive");
   if (!grant.allowed) return c.json({ error: grant.reason }, grant.status as 403);
+
+  const maxAliases = await getUsageLimit(c.env, ctx.userId, APP_ID, "aliases");
+  const count = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM hme_aliases WHERE user_id = ?").bind(ctx.userId).first<{ n: number }>();
+  if (maxAliases !== null && (count?.n ?? 0) >= maxAliases) return c.json({ error: "usage-limit-exceeded" }, 429);
 
   // A handful of retries in case of a collision — alias space is large enough that this is rare
   let alias = "";
@@ -64,8 +68,8 @@ app.post("/aliases", async (c) => {
 });
 
 app.patch("/aliases/:aliasId", async (c) => {
-  const auth = await authenticateApiKey(c.req.raw, c.env, "hme:manage", APP_ID);
-  if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
+  const auth = await authenticateApiKey(c.req.raw, c.env, "hme:edit", APP_ID);
+  if (!auth.allowed) return withRetryAfter(c.json({ error: auth.reason }, auth.status as 401 | 403 | 429), auth);
   const ctx = auth.context!;
   const aliasId = c.req.param("aliasId");
   const body = await c.req.json<{ status?: "active" | "disabled"; label?: string; forwardTo?: string }>();
@@ -90,8 +94,8 @@ app.patch("/aliases/:aliasId", async (c) => {
 });
 
 app.delete("/aliases/:aliasId", async (c) => {
-  const auth = await authenticateApiKey(c.req.raw, c.env, "hme:manage", APP_ID);
-  if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
+  const auth = await authenticateApiKey(c.req.raw, c.env, "hme:delete", APP_ID);
+  if (!auth.allowed) return withRetryAfter(c.json({ error: auth.reason }, auth.status as 401 | 403 | 429), auth);
   await c.env.DB.prepare("DELETE FROM hme_aliases WHERE id = ? AND user_id = ?")
     .bind(c.req.param("aliasId"), auth.context!.userId)
     .run();

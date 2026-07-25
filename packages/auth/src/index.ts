@@ -5,7 +5,11 @@ import {
   checkScope,
   checkResourceGrant,
   checkRateLimit,
+  resolveRateLimit,
   checkUsageLimit,
+  checkUsageLimitForUser,
+  getUsageLimit,
+  checkKeyResourceAccess,
   writeAuditLog,
   sha256Hex,
 } from "./checks";
@@ -18,10 +22,22 @@ export {
   checkScope,
   checkResourceGrant,
   checkRateLimit,
+  resolveRateLimit,
   checkUsageLimit,
+  checkUsageLimitForUser,
+  getUsageLimit,
+  checkKeyResourceAccess,
   writeAuditLog,
   sha256Hex,
 };
+
+/** Applies RFC 9110's Retry-After header when a limiter rejected a request. */
+export function withRetryAfter(response: Response, check: CheckResult): Response {
+  if (check.status === 429 && check.retryAfterSeconds) {
+    response.headers.set("Retry-After", String(check.retryAfterSeconds));
+  }
+  return response;
+}
 
 const DEFAULT_RATE_LIMIT: RateLimitOptions = { windowSeconds: 60, maxRequests: 60 };
 
@@ -60,7 +76,7 @@ export async function authenticateApiKey(
     return scopeCheck;
   }
 
-  const rlCheck = await checkRateLimit(env, context.apiKeyId!, rateLimit);
+  const rlCheck = await checkRateLimit(env, `${appId}:${context.apiKeyId!}`, await resolveRateLimit(env, appId, requiredScope, rateLimit));
   if (!rlCheck.allowed) {
     await writeAuditLog(env, {
       userId: context.userId,
@@ -148,8 +164,8 @@ export async function authenticate(
 
   const rlCheck = await checkRateLimit(
     env,
-    context.apiKeyId ?? `session:${context.userId}`,
-    rateLimit
+    `${appId}:${context.apiKeyId ?? `session:${context.userId}`}`,
+    await resolveRateLimit(env, appId, requiredScope, rateLimit)
   );
   if (!rlCheck.allowed) {
     await writeAuditLog(env, {

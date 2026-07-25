@@ -1,0 +1,63 @@
+openapi: 3.0.3
+info:
+  title: Kitsos Utility API
+  version: 0.1.0
+  description: Cryptographic hashing, time, edge geolocation, and DNS lookup in one API.
+servers:
+  - url: https://utility.api.kitsos.net
+components:
+  securitySchemes:
+    kitsosApiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: Kitsos API key
+  responses:
+    PublicRateLimit:
+      description: Public request budget exceeded; retry later or use an API key.
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string, example: public-rate-limit-exceeded }
+              message: { type: string }
+paths:
+  /crypt/hash:
+    get:
+      summary: Hash a UTF-8 value
+      security: [{}, { kitsosApiKey: [] }]
+      parameters:
+        - { name: value, in: query, required: true, schema: { type: string, maxLength: 16384 } }
+        - { name: algorithm, in: query, schema: { type: string, enum: [SHA-256, SHA-384, SHA-512], default: SHA-256 } }
+      responses:
+        '200': { description: Hash result }
+        '429': { $ref: '#/components/responses/PublicRateLimit' }
+  /time:
+    get:
+      summary: Get current time in an IANA timezone
+      security: [{}, { kitsosApiKey: [] }]
+      parameters:
+        - { name: timeZone, in: query, schema: { type: string, default: UTC, example: Europe/Berlin } }
+      responses:
+        '200': { description: Current time }
+        '429': { $ref: '#/components/responses/PublicRateLimit' }
+  /geo:
+    get:
+      summary: Get Cloudflare edge geolocation for the caller
+      security: [{}, { kitsosApiKey: [] }]
+      responses:
+        '200': { description: Geolocation result }
+        '429': { $ref: '#/components/responses/PublicRateLimit' }
+  /dns:
+    get:
+      summary: Resolve a DNS record
+      security: [{}, { kitsosApiKey: [] }]
+      parameters:
+        - { name: name, in: query, required: true, schema: { type: string, example: example.com } }
+        - { name: type, in: query, schema: { type: string, enum: [A, AAAA, CNAME, MX, TXT], default: A } }
+      responses:
+        '200': { description: DNS answer }
+        '429': { $ref: '#/components/responses/PublicRateLimit' }

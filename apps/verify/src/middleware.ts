@@ -1,20 +1,20 @@
 import type { Context, Next } from "hono";
-import { authenticateApiKey, verifyClerkSession, ensureUserRow } from "@kitsos/auth";
+import { authenticateApiKey, verifyClerkSession, ensureUserRow, withRetryAfter } from "@kitsos/auth";
 import type { Env } from "./env";
 
-export const VERIFY_MANAGE_SCOPE = "verify:manage";
 type VerifyContext = Context<{ Bindings: Env; Variables: { userId: string } }>;
 
 /**
  * Authorizes self-service verification routes with a scoped Kitsos API key.
  * Administrative routes intentionally remain Clerk-session-only below.
  */
-export async function requireUser(c: VerifyContext, next: Next) {
-  const auth = await authenticateApiKey(c.req.raw, c.env, VERIFY_MANAGE_SCOPE, "verify");
-  if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
-
-  c.set("userId", auth.context!.userId);
-  await next();
+export function requireUser(scope: string) {
+  return async (c: VerifyContext, next: Next) => {
+    const auth = await authenticateApiKey(c.req.raw, c.env, scope, "verify");
+    if (!auth.allowed) return withRetryAfter(c.json({ error: auth.reason }, auth.status as 401 | 403 | 429), auth);
+    c.set("userId", auth.context!.userId);
+    await next();
+  };
 }
 
 export async function requireAdmin(c: VerifyContext, next: Next) {

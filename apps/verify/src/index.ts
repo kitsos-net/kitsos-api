@@ -4,6 +4,7 @@ import { withTelemetry } from "@kitsos/telemetry";
 import { requireUser, requireAdmin } from "./middleware";
 import { lookupTxtRecords, verificationRecordName, generateVerificationToken } from "./dns";
 import { sendMagicLinkEmail } from "./mail";
+import { getUsageLimit } from "@kitsos/auth";
 import type { Env } from "./env";
 
 type Vars = { userId: string };
@@ -58,6 +59,21 @@ async function grantAccess(
     .run();
 }
 
+async function canVerifyResource(env: Env, userId: string, resourceId: string): Promise<boolean> {
+  // Reverification does not consume another slot; only distinct verified
+  // resources count towards the account-wide quota.
+  const existing = await env.DB.prepare(
+    "SELECT 1 FROM resource_verifications WHERE user_id = ? AND resource_id = ? AND verified_at IS NOT NULL"
+  ).bind(userId, resourceId).first();
+  if (existing) return true;
+  const max = await getUsageLimit(env, userId, "verify", "verified_resources");
+  if (max === null) return true;
+  const count = await env.DB.prepare(
+    "SELECT COUNT(DISTINCT resource_id) AS n FROM resource_verifications WHERE user_id = ? AND verified_at IS NOT NULL"
+  ).bind(userId).first<{ n: number }>();
+  return (count?.n ?? 0) < max;
+}
+
 // ============================================================
 // Self-service — /resources
 // ============================================================
@@ -67,7 +83,11 @@ resources.use("*", async (c, next) => {
   if (c.req.method === "GET" && new URL(c.req.url).pathname.endsWith("/confirm")) {
     return next();
   }
-  return requireUser(c, next);
+  const path = new URL(c.req.url).pathname;
+  const scope = c.req.method === "GET" ? "verify:resource:read"
+    : c.req.method === "POST" && path.endsWith("/check-dns") ? "verify:resource:verify"
+    : "verify:resource:create";
+  return requireUser(scope)(c, next);
 });
 
 resources.get("/", async (c) => {
@@ -195,6 +215,10 @@ resources.post("/:resourceId/check-dns", async (c) => {
     return c.json({ verified: false, expected: verification.token, found: records }, 200);
   }
 
+  if (!await canVerifyResource(c.env, userId, resourceId)) {
+    return c.json({ error: "usage-limit-exceeded" }, 429);
+  }
+
   await c.env.DB.prepare(
     `UPDATE resource_verifications
      SET verified_at = unixepoch(), reverify_due_at = ?, grace_expires_at = ?
@@ -222,6 +246,10 @@ resources.get("/:resourceId/confirm", async (c) => {
     .first<{ id: string; user_id: string; pending_scopes: string }>();
 
   if (!verification) return c.json({ error: "invalid-or-expired-token" }, 404);
+
+  if (!await canVerifyResource(c.env, verification.user_id, resourceId)) {
+    return c.json({ error: "usage-limit-exceeded" }, 429);
+  }
 
   await c.env.DB.prepare(
     `UPDATE resource_verifications

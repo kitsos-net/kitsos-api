@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { sha256Hex } from "@kitsos/auth";
+import type { ApiKeyResourceGrant } from "@kitsos/auth";
 import { withTelemetry } from "@kitsos/telemetry";
 import { requireAdmin, requireUser } from "./middleware";
 import type { Env } from "./env";
@@ -8,6 +9,11 @@ import type { Env } from "./env";
 type Vars = { userId: string };
 const app = new Hono<{ Bindings: Env; Variables: Vars }>();
 const MAX_SELF_SERVICE_KEY_TTL_SECONDS = 300;
+const PLATFORM_USAGE_DEFAULTS: Record<string, Array<[string, number]>> = {
+  mail: [["emails_per_day", 20], ["webhooks", 10]],
+  "hide-my-email": [["aliases", 25]],
+  verify: [["verified_resources", 20]],
+};
 
 app.use("*", cors({
   origin: "*",
@@ -33,11 +39,14 @@ admin.get("/apps", async (c) => {
 
 admin.post("/apps", async (c) => {
   const body = await c.req.json<{ id: string; name: string; description?: string; environment?: string }>();
-  await c.env.DB.prepare(
-    "INSERT INTO apps (id, name, description, environment) VALUES (?, ?, ?, ?)"
-  )
-    .bind(body.id, body.name, body.description ?? null, body.environment ?? "production")
-    .run();
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      "INSERT INTO apps (id, name, description, environment) VALUES (?, ?, ?, ?)"
+    ).bind(body.id, body.name, body.description ?? null, body.environment ?? "production"),
+    ...(PLATFORM_USAGE_DEFAULTS[body.id] ?? []).map(([limitType, limitValue]) => c.env.DB.prepare(
+      "INSERT OR IGNORE INTO usage_limit_defaults (app_id, limit_type, limit_value) VALUES (?, ?, ?)"
+    ).bind(body.id, limitType, limitValue)),
+  ]);
   return c.json({ id: body.id }, 201);
 });
 
@@ -148,11 +157,11 @@ admin.get("/api-keys", async (c) => {
   const userId = c.req.query("userId");
   const r = userId
     ? await c.env.DB
-        .prepare("SELECT id, user_id, app_id, name, status, scopes, expires_at, last_used_at, created_at FROM api_keys WHERE user_id = ?")
+        .prepare("SELECT id, user_id, app_id, name, status, scopes, expires_at, last_used_at, created_at, (SELECT json_group_array(app_id) FROM api_key_apps WHERE api_key_id = api_keys.id) AS app_ids FROM api_keys WHERE user_id = ?")
         .bind(userId)
         .all()
     : await c.env.DB
-        .prepare("SELECT id, user_id, app_id, name, status, scopes, expires_at, last_used_at, created_at FROM api_keys")
+        .prepare("SELECT id, user_id, app_id, name, status, scopes, expires_at, last_used_at, created_at, (SELECT json_group_array(app_id) FROM api_key_apps WHERE api_key_id = api_keys.id) AS app_ids FROM api_keys")
         .all();
   return c.json(r.results); // never returns key_hash / raw key
 });
@@ -160,25 +169,36 @@ admin.get("/api-keys", async (c) => {
 admin.post("/api-keys", async (c) => {
   const body = await c.req.json<{
     userId: string;
-    appId: string;
+    appId?: string; // legacy single-app input
+    appIds?: string[];
     name?: string;
     scopes: string[];
     expiresAt?: number;
+    resourceGrants?: ApiKeyResourceGrant[];
   }>();
+  const appIds = [...new Set(body.appIds ?? (body.appId ? [body.appId] : []))];
+  if (appIds.length === 0) return c.json({ error: "missing-app-ids" }, 400);
 
   const rawKey = `kitsos_${crypto.randomUUID().replace(/-/g, "")}`;
   const keyHash = await sha256Hex(rawKey);
   const keyId = id();
 
-  await c.env.DB.prepare(
+  await c.env.DB.batch([
+    c.env.DB.prepare(
     `INSERT INTO api_keys (id, key_hash, user_id, app_id, name, status, scopes, expires_at)
      VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`
   )
-    .bind(keyId, keyHash, body.userId, body.appId, body.name ?? null, JSON.stringify(body.scopes), body.expiresAt ?? null)
-    .run();
+    .bind(keyId, keyHash, body.userId, appIds[0], body.name ?? null, JSON.stringify(body.scopes), body.expiresAt ?? null),
+    ...appIds.map((appId) => c.env.DB.prepare(
+      "INSERT INTO api_key_apps (api_key_id, app_id) VALUES (?, ?)"
+    ).bind(keyId, appId)),
+    ...(body.resourceGrants ?? []).map((grant) => c.env.DB.prepare(
+      "INSERT INTO api_key_resource_grants (api_key_id, resource_type, resource_id, scopes) VALUES (?, ?, ?, ?)"
+    ).bind(keyId, grant.resourceType, grant.resourceId, JSON.stringify(grant.scopes ?? []))),
+  ]);
 
   // rawKey is only ever shown here — not recoverable afterwards
-  return c.json({ id: keyId, key: rawKey }, 201);
+  return c.json({ id: keyId, key: rawKey, appIds, resourceGrants: body.resourceGrants ?? [] }, 201);
 });
 
 admin.delete("/api-keys/:keyId", async (c) => {
@@ -212,6 +232,21 @@ admin.post("/usage-limits", async (c) => {
     .bind(limitId, body.userId, body.appId, body.limitType, body.limitValue, body.isOverride ? 1 : 0)
     .run();
   return c.json({ id: limitId }, 201);
+});
+
+admin.get("/usage-limit-defaults", async (c) => {
+  const r = await c.env.DB.prepare("SELECT * FROM usage_limit_defaults ORDER BY app_id, limit_type").all();
+  return c.json(r.results);
+});
+
+admin.put("/usage-limit-defaults", async (c) => {
+  const body = await c.req.json<{ appId: string; limitType: string; limitValue: number }>();
+  if (!Number.isInteger(body.limitValue) || body.limitValue < 0) return c.json({ error: "invalid-limit-value" }, 400);
+  await c.env.DB.prepare(
+    `INSERT INTO usage_limit_defaults (app_id, limit_type, limit_value) VALUES (?, ?, ?)
+     ON CONFLICT(app_id, limit_type) DO UPDATE SET limit_value = excluded.limit_value`
+  ).bind(body.appId, body.limitType, body.limitValue).run();
+  return c.body(null, 204);
 });
 
 // --- Limit increase requests (admin review) ---
@@ -282,7 +317,7 @@ me.get("/", async (c) => {
 
 me.get("/api-keys", async (c) => {
   const r = await c.env.DB
-    .prepare("SELECT id, app_id, name, status, scopes, expires_at, last_used_at, created_at FROM api_keys WHERE user_id = ?")
+    .prepare("SELECT id, app_id, name, status, scopes, expires_at, last_used_at, created_at, (SELECT json_group_array(app_id) FROM api_key_apps WHERE api_key_id = api_keys.id) AS app_ids FROM api_keys WHERE user_id = ?")
     .bind(c.get("userId"))
     .all();
   return c.json(r.results);
@@ -292,11 +327,15 @@ me.get("/api-keys", async (c) => {
 me.post("/api-keys", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json<{
-    appId: string;
+    appId?: string; // legacy single-app input
+    appIds?: string[];
     name?: string;
     scopes: string[];
     expiresAt?: number;
+    resourceGrants?: ApiKeyResourceGrant[];
   }>();
+  const appIds = [...new Set(body.appIds ?? (body.appId ? [body.appId] : []))];
+  if (appIds.length === 0) return c.json({ error: "missing-app-ids" }, 400);
 
   const now = Math.floor(Date.now() / 1000);
   if (
@@ -315,12 +354,12 @@ me.post("/api-keys", async (c) => {
 
   const policyRows = await c.env.DB
     .prepare(
-      `SELECT scopes FROM policies WHERE app_id = ? AND (
+      `SELECT scopes FROM policies WHERE app_id IN (${appIds.map(() => "?").join(",")}) AND (
          (subject_type = 'user' AND subject_id = ?) OR
          (subject_type = 'group' AND subject_id IN (${groupIds.map(() => "?").join(",") || "''"}))
        )`
     )
-    .bind(body.appId, userId, ...groupIds)
+    .bind(...appIds, userId, ...groupIds)
     .all<{ scopes: string }>();
 
   const allowedScopes = new Set<string>(policyRows.results.flatMap((p) => JSON.parse(p.scopes) as string[]));
@@ -334,21 +373,28 @@ me.post("/api-keys", async (c) => {
   const keyHash = await sha256Hex(rawKey);
   const keyId = id();
 
-  await c.env.DB.prepare(
+  await c.env.DB.batch([
+    c.env.DB.prepare(
     "INSERT INTO api_keys (id, key_hash, user_id, app_id, name, status, scopes, expires_at) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)"
   )
     .bind(
       keyId,
       keyHash,
       userId,
-      body.appId,
+      appIds[0],
       body.name ?? null,
       JSON.stringify(requestedScopes),
       body.expiresAt ?? null
-    )
-    .run();
+    ),
+    ...appIds.map((appId) => c.env.DB.prepare(
+      "INSERT INTO api_key_apps (api_key_id, app_id) VALUES (?, ?)"
+    ).bind(keyId, appId)),
+    ...(body.resourceGrants ?? []).map((grant) => c.env.DB.prepare(
+      "INSERT INTO api_key_resource_grants (api_key_id, resource_type, resource_id, scopes) VALUES (?, ?, ?, ?)"
+    ).bind(keyId, grant.resourceType, grant.resourceId, JSON.stringify(grant.scopes ?? []))),
+  ]);
 
-  return c.json({ id: keyId, key: rawKey, scopes: requestedScopes, expiresAt: body.expiresAt ?? null }, 201);
+  return c.json({ id: keyId, key: rawKey, appIds, scopes: requestedScopes, resourceGrants: body.resourceGrants ?? [], expiresAt: body.expiresAt ?? null }, 201);
 });
 
 me.delete("/api-keys/:keyId", async (c) => {
