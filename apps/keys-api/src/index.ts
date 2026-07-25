@@ -7,6 +7,7 @@ import type { Env } from "./env";
 
 type Vars = { userId: string };
 const app = new Hono<{ Bindings: Env; Variables: Vars }>();
+const MAX_SELF_SERVICE_KEY_TTL_SECONDS = 300;
 
 app.use("*", cors({
   origin: "*",
@@ -290,7 +291,22 @@ me.get("/api-keys", async (c) => {
 // Users may only create keys with scopes their own policy already grants.
 me.post("/api-keys", async (c) => {
   const userId = c.get("userId");
-  const body = await c.req.json<{ appId: string; name?: string; scopes: string[] }>();
+  const body = await c.req.json<{
+    appId: string;
+    name?: string;
+    scopes: string[];
+    expiresAt?: number;
+  }>();
+
+  const now = Math.floor(Date.now() / 1000);
+  if (
+    body.expiresAt !== undefined &&
+    (!Number.isInteger(body.expiresAt) ||
+      body.expiresAt <= now ||
+      body.expiresAt > now + MAX_SELF_SERVICE_KEY_TTL_SECONDS)
+  ) {
+    return c.json({ error: "invalid-expires-at", maxTtlSeconds: MAX_SELF_SERVICE_KEY_TTL_SECONDS }, 400);
+  }
 
   const groupRows = await c.env.DB.prepare("SELECT group_id FROM group_members WHERE user_id = ?")
     .bind(userId)
@@ -319,12 +335,20 @@ me.post("/api-keys", async (c) => {
   const keyId = id();
 
   await c.env.DB.prepare(
-    "INSERT INTO api_keys (id, key_hash, user_id, app_id, name, status, scopes) VALUES (?, ?, ?, ?, ?, 'active', ?)"
+    "INSERT INTO api_keys (id, key_hash, user_id, app_id, name, status, scopes, expires_at) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)"
   )
-    .bind(keyId, keyHash, userId, body.appId, body.name ?? null, JSON.stringify(requestedScopes))
+    .bind(
+      keyId,
+      keyHash,
+      userId,
+      body.appId,
+      body.name ?? null,
+      JSON.stringify(requestedScopes),
+      body.expiresAt ?? null
+    )
     .run();
 
-  return c.json({ id: keyId, key: rawKey, scopes: requestedScopes }, 201);
+  return c.json({ id: keyId, key: rawKey, scopes: requestedScopes, expiresAt: body.expiresAt ?? null }, 201);
 });
 
 me.delete("/api-keys/:keyId", async (c) => {

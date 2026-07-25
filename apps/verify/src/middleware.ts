@@ -1,21 +1,23 @@
 import type { Context, Next } from "hono";
-import { verifyClerkSession, ensureUserRow } from "@kitsos/auth";
+import { authenticateApiKey, verifyClerkSession, ensureUserRow } from "@kitsos/auth";
 import type { Env } from "./env";
 
-export async function requireUser(c: Context<{ Bindings: Env }>, next: Next) {
-  const authHeader = c.req.header("Authorization") ?? "";
-  const token = authHeader.replace(/^Bearer\s+/i, "");
-  if (!token) return c.json({ error: "missing-credentials" }, 401);
+export const VERIFY_MANAGE_SCOPE = "verify:manage";
+type VerifyContext = Context<{ Bindings: Env; Variables: { userId: string } }>;
 
-  const session = await verifyClerkSession(token, c.env);
-  if (!session) return c.json({ error: "invalid-credentials" }, 401);
+/**
+ * Authorizes self-service verification routes with a scoped Kitsos API key.
+ * Administrative routes intentionally remain Clerk-session-only below.
+ */
+export async function requireUser(c: VerifyContext, next: Next) {
+  const auth = await authenticateApiKey(c.req.raw, c.env, VERIFY_MANAGE_SCOPE, "verify");
+  if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
 
-  await ensureUserRow(session.userId, c.env);
-  c.set("userId", session.userId);
+  c.set("userId", auth.context!.userId);
   await next();
 }
 
-export async function requireAdmin(c: Context<{ Bindings: Env }>, next: Next) {
+export async function requireAdmin(c: VerifyContext, next: Next) {
   const authHeader = c.req.header("Authorization") ?? "";
   const token = authHeader.replace(/^Bearer\s+/i, "");
   if (!token) return c.json({ error: "missing-credentials" }, 401);

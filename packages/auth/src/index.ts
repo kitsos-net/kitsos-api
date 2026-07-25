@@ -26,6 +26,65 @@ export {
 const DEFAULT_RATE_LIMIT: RateLimitOptions = { windowSeconds: 60, maxRequests: 60 };
 
 /**
+ * API-key-only variant for machine-facing endpoints. Unlike authenticate(),
+ * this never falls back to a Clerk session token.
+ */
+export async function authenticateApiKey(
+  request: Request,
+  env: Env,
+  requiredScope: string,
+  appId: string,
+  rateLimit: RateLimitOptions = DEFAULT_RATE_LIMIT
+): Promise<CheckResult & { context?: AuthContext }> {
+  const authHeader = request.headers.get("Authorization") ?? "";
+  const token = authHeader.replace(/^Bearer\s+/i, "");
+
+  if (!token) return { allowed: false, status: 401, reason: "missing-credentials" };
+  if (!token.startsWith("kitsos_")) {
+    return { allowed: false, status: 401, reason: "api-key-required" };
+  }
+
+  const context = await validateApiKey(token, appId, env);
+  if (!context) return { allowed: false, status: 401, reason: "invalid-credentials" };
+
+  const scopeCheck = checkScope(context, requiredScope);
+  if (!scopeCheck.allowed) {
+    await writeAuditLog(env, {
+      userId: context.userId,
+      appId,
+      apiKeyId: context.apiKeyId,
+      action: requiredScope,
+      result: "denied",
+      reason: scopeCheck.reason,
+    });
+    return scopeCheck;
+  }
+
+  const rlCheck = await checkRateLimit(env, context.apiKeyId!, rateLimit);
+  if (!rlCheck.allowed) {
+    await writeAuditLog(env, {
+      userId: context.userId,
+      appId,
+      apiKeyId: context.apiKeyId,
+      action: requiredScope,
+      result: "denied",
+      reason: rlCheck.reason,
+    });
+    return rlCheck;
+  }
+
+  await writeAuditLog(env, {
+    userId: context.userId,
+    appId,
+    apiKeyId: context.apiKeyId,
+    action: requiredScope,
+    result: "allowed",
+  });
+
+  return { allowed: true, status: 200, context };
+}
+
+/**
  * Standard entry point for app workers. Pulls credentials from the
  * request (Authorization header — either a Clerk session JWT or a
  * `kitsos_` API key), runs scope + rate-limit checks, and writes an

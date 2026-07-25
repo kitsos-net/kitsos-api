@@ -62,7 +62,13 @@ async function grantAccess(
 // Self-service — /resources
 // ============================================================
 const resources = new Hono<{ Bindings: Env; Variables: Vars }>();
-resources.use("*", requireUser);
+resources.use("*", async (c, next) => {
+  // Magic-link confirmations are authenticated by their one-time token.
+  if (c.req.method === "GET" && new URL(c.req.url).pathname.endsWith("/confirm")) {
+    return next();
+  }
+  return requireUser(c, next);
+});
 
 resources.get("/", async (c) => {
   const userId = c.get("userId");
