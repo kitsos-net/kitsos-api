@@ -21,6 +21,7 @@ const DNS_GRACE_DAYS = 7;
 const MAGIC_LINK_REVERIFY_DAYS = 90;
 const MAGIC_LINK_GRACE_DAYS = 14;
 const MAX_VERIFY_EMAILS_PER_DAY = 15;
+const CANONICAL_RESOURCE_APP_ID = "verify";
 
 function id() {
   return crypto.randomUUID();
@@ -29,7 +30,7 @@ function daysFromNow(days: number): number {
   return Math.floor(Date.now() / 1000) + days * 86400;
 }
 
-async function findOrCreateResource(env: Env, userId: string, appId: string, resourceType: string, value: string) {
+async function findOrCreateResource(env: Env, userId: string, resourceType: string, value: string) {
   const findExisting = () => env.DB.prepare(
     `SELECT r.id FROM resources r
      LEFT JOIN resource_verifications rv ON rv.resource_id = r.id AND rv.user_id = ?
@@ -46,7 +47,7 @@ async function findOrCreateResource(env: Env, userId: string, appId: string, res
   await env.DB.prepare(
     "INSERT OR IGNORE INTO resources (id, app_id, resource_type, value) VALUES (?, ?, ?, ?)"
   )
-    .bind(id(), appId, resourceType, value)
+    .bind(id(), CANONICAL_RESOURCE_APP_ID, resourceType, value)
     .run();
 
   const resource = await findExisting();
@@ -153,7 +154,6 @@ const VALID_METHODS = ["dns_txt", "magic_link"];
 resources.post("/", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json<{
-    appId?: string;
     resourceType?: string;
     value?: string;
     method?: string;
@@ -162,7 +162,7 @@ resources.post("/", async (c) => {
 
   if (!body) return c.json({ error: "invalid-json-body" }, 400);
 
-  const missing = ["appId", "resourceType", "value", "method"].filter(
+  const missing = ["resourceType", "value", "method"].filter(
     (k) => !body[k as keyof typeof body]
   );
   if (missing.length > 0) {
@@ -175,13 +175,6 @@ resources.post("/", async (c) => {
     return c.json({ error: "missing-scopes" }, 400);
   }
 
-  const appExists = await c.env.DB.prepare("SELECT 1 FROM apps WHERE id = ?")
-    .bind(body.appId)
-    .first();
-  if (!appExists) {
-    return c.json({ error: "app-not-found", appId: body.appId, hint: "Create the app first via keys-api /admin/apps" }, 404);
-  }
-
   const method = body.method as "dns_txt" | "magic_link";
 
   let resourceId: string;
@@ -189,7 +182,7 @@ resources.post("/", async (c) => {
   const token = generateVerificationToken();
 
   try {
-    resourceId = await findOrCreateResource(c.env, userId, body.appId!, body.resourceType!, body.value!);
+    resourceId = await findOrCreateResource(c.env, userId, body.resourceType!, body.value!);
     if (await hasActiveVerification(c.env, resourceId, userId)) {
       const scopes = await grantAccess(c.env, resourceId, userId, body.scopes);
       return c.json({ resourceId, alreadyVerified: true, scopes }, 200);

@@ -93,9 +93,8 @@ paths:
           application/json:
             schema:
               type: object
-              required: [appId, resourceType, value, method, scopes]
+              required: [resourceType, value, method, scopes]
               properties:
-                appId: { type: string, description: Legacy provenance for a newly created resource; ownership and grants are shared across API apps. }
                 resourceType: { type: string, example: zone }
                 value: { type: string, example: domain.de }
                 method: { type: string, enum: [dns_txt, magic_link] }
