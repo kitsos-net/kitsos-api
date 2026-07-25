@@ -1,18 +1,31 @@
 openapi: 3.0.3
 info:
   title: Kitsos Mail API
-  description: >
+  description: |
     Email sending — manual or template-based (POST /send), plus
     user-managed webhooks with dot-notation payload → template
     variable mapping. Webhook triggers are public, gated by a
     per-webhook secret header rather than @kitsos/auth.
   version: "0.1.0"
+  contact:
+    name: Kitsos
+    url: 'https://kitsos.net/contact'
+    email: support@services.kitsos.net
+  termsOfService: 'https://kitsos.net/terms'
+  license:
+    name: Proprietary
+    url: 'https://kitsos.net/terms'
 servers:
-  - url: https://mail.api.kitsos.net
+  - url: 'https://mail.api.kitsos.net'
 tags:
   - name: Default
-  - name: User
+    description: Health check.
+  - name: Send
+    description: Send one-off or template-rendered email.
+  - name: Templates
+    description: Manage reusable mail templates.
   - name: Webhooks
+    description: Manage and trigger email webhooks.
 
 components:
   securitySchemes:
@@ -50,15 +63,20 @@ components:
 paths:
   /health:
     get:
-      tags: [Default]
       summary: Health check
+      description: "Health check."
+      operationId: getHealth
+      tags: [Default]
+      security: []
       responses:
         "200": { description: OK }
 
   /send:
     post:
-      tags: [User]
       summary: Send an email, manually or via a saved template
+      description: "Send an email, manually or via a saved template."
+      operationId: postSend
+      tags: [Send]
       security: [{ apiKey: [] }]
       requestBody:
         required: true
@@ -83,11 +101,13 @@ paths:
 
   /webhook/{webhookId}:
     post:
-      tags: [Webhooks]
       summary: Trigger a webhook — renders its template with the mapped payload and sends
+      description: "Trigger a webhook — renders its template with the mapped payload and sends."
+      operationId: postWebhookWebhookid
+      tags: [Webhooks]
       security: [{ webhookSecret: [] }]
       parameters:
-        - { name: webhookId, in: path, required: true, schema: { type: string } }
+        - { name: webhookId, in: path, required: true, schema: { type: string }, description: "Path parameter webhookId." }
       requestBody:
         description: Arbitrary JSON payload, resolved against the webhook's dot-notation mapping
         content:
@@ -104,14 +124,18 @@ paths:
 
   /templates:
     get:
-      tags: [User]
       summary: List your own templates
+      description: "List your own templates."
+      operationId: getTemplates
+      tags: [Templates]
       security: [{ apiKey: [] }]
       responses:
         "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Template' } } } } }
     post:
-      tags: [User]
       summary: Create a template
+      description: "Create a template."
+      operationId: postTemplates
+      tags: [Templates]
       security: [{ apiKey: [] }]
       requestBody:
         required: true
@@ -129,11 +153,13 @@ paths:
 
   /templates/{templateId}:
     patch:
-      tags: [User]
       summary: Update a template's URL or variables (invalidates the 1h HTML cache)
+      description: "Update a template's URL or variables (invalidates the 1h HTML cache)."
+      operationId: patchTemplatesTemplateid
+      tags: [Templates]
       security: [{ apiKey: [] }]
       parameters:
-        - { name: templateId, in: path, required: true, schema: { type: string } }
+        - { name: templateId, in: path, required: true, schema: { type: string }, description: "Path parameter templateId." }
       requestBody:
         content:
           application/json:
@@ -145,24 +171,30 @@ paths:
       responses:
         "204": { description: No Content }
     delete:
-      tags: [User]
       summary: Delete a template
+      description: "Delete a template."
+      operationId: deleteTemplatesTemplateid
+      tags: [Templates]
       security: [{ apiKey: [] }]
       parameters:
-        - { name: templateId, in: path, required: true, schema: { type: string } }
+        - { name: templateId, in: path, required: true, schema: { type: string }, description: "Path parameter templateId." }
       responses:
         "204": { description: No Content }
 
   /webhooks:
     get:
-      tags: [User]
       summary: List your own webhooks (secret never included)
+      description: "List your own webhooks (secret never included)."
+      operationId: getWebhooks
+      tags: [Webhooks]
       security: [{ apiKey: [] }]
       responses:
         "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Webhook' } } } } }
     post:
-      tags: [User]
       summary: Create a webhook (returns the secret once)
+      description: "Create a webhook (returns the secret once)."
+      operationId: postWebhooks
+      tags: [Webhooks]
       security: [{ apiKey: [] }]
       requestBody:
         required: true
@@ -194,11 +226,13 @@ paths:
 
   /webhooks/{webhookId}:
     patch:
-      tags: [User]
       summary: Update a webhook's template, addresses, or mapping
+      description: "Update a webhook's template, addresses, or mapping."
+      operationId: patchWebhooksWebhookid
+      tags: [Webhooks]
       security: [{ apiKey: [] }]
       parameters:
-        - { name: webhookId, in: path, required: true, schema: { type: string } }
+        - { name: webhookId, in: path, required: true, schema: { type: string }, description: "Path parameter webhookId." }
       requestBody:
         content:
           application/json:
@@ -212,10 +246,12 @@ paths:
       responses:
         "204": { description: No Content }
     delete:
-      tags: [User]
       summary: Delete a webhook
+      description: "Delete a webhook."
+      operationId: deleteWebhooksWebhookid
+      tags: [Webhooks]
       security: [{ apiKey: [] }]
       parameters:
-        - { name: webhookId, in: path, required: true, schema: { type: string } }
+        - { name: webhookId, in: path, required: true, schema: { type: string }, description: "Path parameter webhookId." }
       responses:
         "204": { description: No Content }

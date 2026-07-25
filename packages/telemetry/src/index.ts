@@ -21,7 +21,7 @@ export function withTelemetry<Env extends TelemetryEnv>(
 ) {
   const config: ResolveConfigFn = (env: Env) => ({
     exporter: {
-      url: "https://api.axiom.co/v1/traces",
+      url: "https://eu-central-1.aws.edge.axiom.co/v1/traces",
       headers: {
         Authorization: `Bearer ${env.AXIOM_TOKEN}`,
         "X-Axiom-Dataset": env.AXIOM_DATASET,
