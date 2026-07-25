@@ -27,14 +27,18 @@ export async function validateApiKey(
   env: Env
 ): Promise<AuthContext | null> {
   const keyHash = await sha256Hex(rawKey);
-  const cacheKey = `auth:${keyHash}`;
+  // The same key can be valid for several apps, so the effective policy
+  // intersection is app-specific and must not share a cache entry.
+  const cacheKey = `auth:${keyHash}:${appId}`;
 
   const cached = await env.AUTH_CACHE.get(cacheKey, "json");
   if (cached) return cached as AuthContext;
 
   const row = await env.DB.prepare(
-    `SELECT id, user_id, app_id, status, scopes, expires_at
-     FROM api_keys WHERE key_hash = ? AND app_id = ?`
+    `SELECT k.id, k.user_id, k.app_id, k.status, k.scopes, k.expires_at
+     FROM api_keys k
+     WHERE k.key_hash = ?
+       AND EXISTS (SELECT 1 FROM api_key_apps ka WHERE ka.api_key_id = k.id AND ka.app_id = ?)`
   )
     .bind(keyHash, appId)
     .first<{
@@ -99,7 +103,11 @@ export async function validateApiKey(
 }
 
 export function checkScope(context: AuthContext, requiredScope: string): CheckResult {
-  if (context.scopes.includes(requiredScope)) {
+  const namespace = requiredScope.split(":", 1)[0];
+  // Keep existing broad keys working while new keys can use narrowly scoped
+  // permissions. This is deliberately one-way: a granular scope never
+  // implies another granular scope.
+  if (context.scopes.includes(requiredScope) || context.scopes.includes(`${namespace}:manage`)) {
     return { allowed: true, status: 200 };
   }
   return { allowed: false, status: 403, reason: "scope-missing" };
@@ -168,7 +176,13 @@ export async function checkRateLimit(
   const count = current ? parseInt(current, 10) : 0;
 
   if (count >= options.maxRequests) {
-    return { allowed: false, status: 429, reason: "rate-limit-exceeded" };
+    const now = Math.floor(Date.now() / 1000);
+    return {
+      allowed: false,
+      status: 429,
+      reason: "rate-limit-exceeded",
+      retryAfterSeconds: Math.max(1, options.windowSeconds - (now % options.windowSeconds)),
+    };
   }
 
   await env.USAGE_COUNTERS.put(kvKey, String(count + 1), {
@@ -176,6 +190,23 @@ export async function checkRateLimit(
   });
 
   return { allowed: true, status: 200 };
+}
+
+/** Returns the most specific configured rate limit, or the safe default. */
+export async function resolveRateLimit(
+  env: Env,
+  appId: string,
+  scope: string,
+  fallback: RateLimitOptions
+): Promise<RateLimitOptions> {
+  const row = await env.DB.prepare(
+    `SELECT window_seconds, max_requests FROM rate_limit_rules
+     WHERE app_id = ? AND (scope = ? OR scope IS NULL)
+     ORDER BY CASE WHEN scope = ? THEN 0 ELSE 1 END LIMIT 1`
+  ).bind(appId, scope, scope).first<{ window_seconds: number; max_requests: number }>();
+  return row
+    ? { windowSeconds: row.window_seconds, maxRequests: row.max_requests }
+    : fallback;
 }
 
 /**
@@ -188,27 +219,57 @@ export async function checkUsageLimit(
   context: AuthContext,
   options: UsageLimitOptions
 ): Promise<CheckResult> {
+  return checkUsageLimitForUser(env, context.userId, context.appId, options);
+}
+
+export async function getUsageLimit(
+  env: Env,
+  userId: string,
+  appId: string,
+  limitType: string
+): Promise<number | null> {
   const limitRow = await env.DB.prepare(
     `SELECT limit_value FROM usage_limits
      WHERE user_id = ? AND app_id = ? AND limit_type = ?
      ORDER BY is_override DESC LIMIT 1`
   )
-    .bind(context.userId, context.appId, options.limitType)
+    .bind(userId, appId, limitType)
     .first<{ limit_value: number }>();
 
-  if (!limitRow) {
+  if (limitRow) return limitRow.limit_value;
+  const defaultRow = await env.DB.prepare(
+    "SELECT limit_value FROM usage_limit_defaults WHERE app_id = ? AND limit_type = ?"
+  ).bind(appId, limitType).first<{ limit_value: number }>();
+  return defaultRow?.limit_value ?? null;
+}
+
+export async function checkUsageLimitForUser(
+  env: Env,
+  userId: string,
+  appId: string,
+  options: UsageLimitOptions
+): Promise<CheckResult> {
+  const limitValue = await getUsageLimit(env, userId, appId, options.limitType);
+
+  if (limitValue === null) {
     // No configured limit = no enforcement for this limit_type
     return { allowed: true, status: 200 };
   }
 
   const dayBucket = Math.floor(Date.now() / 1000 / 86400);
-  const kvKey = `usage:${context.userId}:${context.appId}:${options.limitType}:${dayBucket}`;
+  const kvKey = `usage:${userId}:${appId}:${options.limitType}:${dayBucket}`;
   const current = await env.USAGE_COUNTERS.get(kvKey);
   const count = current ? parseInt(current, 10) : 0;
   const cost = options.cost ?? 1;
 
-  if (count + cost > limitRow.limit_value) {
-    return { allowed: false, status: 429, reason: "usage-limit-exceeded" };
+  if (count + cost > limitValue) {
+    const now = Math.floor(Date.now() / 1000);
+    return {
+      allowed: false,
+      status: 429,
+      reason: "usage-limit-exceeded",
+      retryAfterSeconds: Math.max(1, 86400 - (now % 86400)),
+    };
   }
 
   await env.USAGE_COUNTERS.put(kvKey, String(count + cost), {
@@ -216,6 +277,27 @@ export async function checkUsageLimit(
   });
 
   return { allowed: true, status: 200 };
+}
+
+/** Enforces optional per-key resource allow-lists. Session auth is unrestricted. */
+export async function checkKeyResourceAccess(
+  env: Env,
+  context: AuthContext,
+  resourceType: string,
+  resourceId: string,
+  scope: string
+): Promise<CheckResult> {
+  if (!context.apiKeyId) return { allowed: true, status: 200 };
+  const rules = await env.DB.prepare(
+    "SELECT resource_id, scopes FROM api_key_resource_grants WHERE api_key_id = ? AND resource_type = ?"
+  ).bind(context.apiKeyId, resourceType).all<{ resource_id: string; scopes: string }>();
+  if (rules.results.length === 0) return { allowed: true, status: 200 };
+  const grant = rules.results.find((rule) => rule.resource_id === resourceId);
+  if (!grant) return { allowed: false, status: 403, reason: "key-resource-not-granted" };
+  const scopes: string[] = JSON.parse(grant.scopes);
+  return scopes.length === 0 || scopes.includes(scope)
+    ? { allowed: true, status: 200 }
+    : { allowed: false, status: 403, reason: "key-resource-scope-missing" };
 }
 
 export async function writeAuditLog(
