@@ -1,10 +1,25 @@
 openapi: 3.0.3
 info:
   title: Kitsos Keys API
-  description: Self-service API for Kitsos accounts and API keys. Administrative endpoints are documented separately in the Keys Admin API.
+  summary: Self-service API for Kitsos accounts and API keys.
+  description: >
+    Create and manage your own API keys and request usage-limit increases.
+    Administrative platform endpoints are deliberately documented separately
+    in the Kitsos Keys Admin API.
   version: "0.1.0"
+  contact:
+    name: Kitsos Support
+    url: https://kitsos.net/contact
+    email: support@services.kitsos.net
+  license:
+    name: Proprietary
+    url: https://kitsos.net/terms
 servers:
   - url: https://keys.api.kitsos.net
+    description: Production
+externalDocs:
+  description: Kitsos API documentation
+  url: https://docs.api.kitsos.net
 tags:
   - name: Default
     description: Service availability.
@@ -16,7 +31,7 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: Clerk session JWT.
+      description: Clerk session JWT for the currently signed-in user.
   schemas:
     ApiKey:
       type: object
@@ -47,6 +62,8 @@ paths:
     get:
       tags: [Default]
       summary: Health check
+      description: Returns the current availability of the Keys API.
+      operationId: getKeysHealth
       security: []
       responses:
         "200": { description: OK }
@@ -54,17 +71,22 @@ paths:
     get:
       tags: [Self-service]
       summary: Get own user profile
+      description: Returns the profile of the currently signed-in user.
+      operationId: getMe
       responses:
         "200": { description: OK }
   /me/api-keys:
     get:
       tags: [Self-service]
       summary: List own API keys
+      description: Lists API keys owned by the currently signed-in user.
+      operationId: getMeApiKeys
       responses:
         "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/ApiKey' } } } } }
     post:
       tags: [Self-service]
       summary: Create an API key for yourself (scopes limited to what your policy already grants)
+      operationId: postMeApiKeys
       requestBody:
         required: true
         content:
@@ -83,6 +105,7 @@ paths:
     delete:
       tags: [Self-service]
       summary: Revoke one of your own API keys
+      operationId: deleteMeApiKeysKeyid
       parameters:
         - { name: keyId, in: path, required: true, schema: { type: string } }
       responses:
@@ -91,11 +114,13 @@ paths:
     get:
       tags: [Self-service]
       summary: List your own limit increase requests
+      operationId: getMeLimitIncreaseRequests
       responses:
         "200": { description: OK }
     post:
       tags: [Self-service]
       summary: Request a usage limit increase
+      operationId: postMeLimitIncreaseRequests
       requestBody:
         required: true
         content:

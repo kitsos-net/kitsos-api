@@ -3,8 +3,16 @@ info:
   title: Kitsos Keys Admin API
   description: Administrative API for managing the Kitsos platform. Every endpoint except the health check requires an administrator Clerk session.
   version: "0.1.0"
+  contact:
+    name: Kitsos Support
+    url: https://kitsos.net/contact
+    email: support@services.kitsos.net
+  license:
+    name: Proprietary
+    url: https://kitsos.net/terms
 servers:
   - url: https://keys.api.kitsos.net
+    description: Production
 tags:
   - name: Default
     description: Service availability.
