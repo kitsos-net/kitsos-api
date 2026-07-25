@@ -2,8 +2,10 @@ openapi: 3.0.3
 info:
   title: Kitsos Verify API
   description: |
-    Resource ownership verification (DNS-TXT or magic link) — the gate
-    before any resource_grants row gets created. Every route except
+    Platform-wide resource ownership verification (DNS-TXT or magic link).
+    Once a user has verified a domain or email address, additional API
+    scopes can be granted for that same resource without re-verifying it.
+    Every route except
     the health check and the magic-link confirm endpoint requires a
     Kitsos API key with a verify:resource:* scope. Admin routes require
     a Clerk session belonging to the configured admin group.
@@ -80,8 +82,8 @@ paths:
             application/json:
               schema: { type: array, items: { $ref: '#/components/schemas/ResourceVerification' } }
     post:
-      summary: Register a resource and start a verification attempt
-      description: "Register a resource and start a verification attempt."
+      summary: Register a resource or add scopes to an existing verified resource
+      description: "Starts a verification only when the caller has not already verified the same resource. Otherwise the requested scopes are added immediately."
       operationId: postResources
       tags: [Resources]
       security: [{ apiKey: [] }]
@@ -93,12 +95,22 @@ paths:
               type: object
               required: [appId, resourceType, value, method, scopes]
               properties:
-                appId: { type: string }
+                appId: { type: string, description: Legacy provenance for a newly created resource; ownership and grants are shared across API apps. }
                 resourceType: { type: string, example: zone }
                 value: { type: string, example: domain.de }
                 method: { type: string, enum: [dns_txt, magic_link] }
                 scopes: { type: array, items: { type: string } }
       responses:
+        "200":
+          description: The resource was already verified; requested scopes were added without a new challenge.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  resourceId: { type: string }
+                  alreadyVerified: { type: boolean, example: true }
+                  scopes: { type: array, items: { type: string } }
         "201":
           description: >
             For dns_txt: returns the TXT record name/value to add.
