@@ -4,8 +4,9 @@ info:
   description: |
     Platform-wide resource ownership verification. Domains use DNS-TXT;
     email addresses use a magic link sent to that exact address. Once
-    verified, the resource can be used with every Kitsos API. API-key
-    scopes still control which operations the key may perform.
+    verified, the resource can be used with every Kitsos API. Email
+    verification is permanent; domain ownership is rechecked daily.
+    API-key scopes still control which operations the key may perform.
     Every route except the health check and the magic-link confirm endpoint requires a
     Kitsos API key with a verify:resource:* scope. Admin routes require
     a Clerk session belonging to the configured admin group.

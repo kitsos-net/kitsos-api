@@ -24,6 +24,9 @@ type ResourceType = keyof typeof RESOURCE_METHODS;
 function id() {
   return crypto.randomUUID();
 }
+function tomorrow(): number {
+  return Math.floor(Date.now() / 1000) + 86400;
+}
 
 function normalizeResource(resourceType: ResourceType, rawValue: string) {
   const value = rawValue.trim().toLowerCase();
@@ -304,10 +307,10 @@ resources.post("/:resourceId/check-dns", async (c) => {
 
   await c.env.DB.prepare(
     `UPDATE resource_verifications
-     SET verified_at = unixepoch(), reverify_due_at = NULL, grace_expires_at = NULL
+     SET verified_at = unixepoch(), reverify_due_at = ?, grace_expires_at = NULL
      WHERE id = ?`
   )
-    .bind(verification.id)
+    .bind(tomorrow(), verification.id)
     .run();
 
   await grantAccess(c.env, resourceId, userId);
@@ -380,4 +383,63 @@ app.route("/admin", admin);
 
 app.get("/health", (c) => c.json({ ok: true }));
 
-export default withTelemetry(app, "verify");
+type VerifiedZone = {
+  id: string;
+  token: string;
+  value: string;
+};
+
+async function recheckVerifiedZones(env: Env) {
+  let afterId = "";
+  for (;;) {
+    const page = await env.DB.prepare(
+      `SELECT rv.id, rv.token, r.value
+       FROM resource_verifications rv
+       JOIN resources r ON r.id = rv.resource_id
+       WHERE r.resource_type = 'zone'
+         AND rv.method = 'dns_txt'
+         AND rv.verified_at IS NOT NULL
+         AND rv.id > ?
+       ORDER BY rv.id
+       LIMIT 100`
+    ).bind(afterId).all<VerifiedZone>();
+
+    if (page.results.length === 0) break;
+
+    for (let offset = 0; offset < page.results.length; offset += 10) {
+      await Promise.all(page.results.slice(offset, offset + 10).map(async (verification) => {
+        try {
+          const records = await lookupTxtRecords(verificationRecordName(verification.value));
+          if (records.includes(verification.token)) {
+            await env.DB.prepare(
+              "UPDATE resource_verifications SET reverify_due_at = ? WHERE id = ?"
+            ).bind(tomorrow(), verification.id).run();
+          } else {
+            await env.DB.prepare(
+              `UPDATE resource_verifications
+               SET verified_at = NULL, reverify_due_at = NULL, grace_expires_at = NULL
+               WHERE id = ?`
+            ).bind(verification.id).run();
+          }
+        } catch {
+          // A resolver/network failure is not proof that ownership was lost.
+          // Leave the last verified state intact and try again on the next run.
+        }
+      }));
+    }
+
+    afterId = page.results[page.results.length - 1].id;
+    if (page.results.length < 100) break;
+  }
+}
+
+const telemetryHandler = withTelemetry(app, "verify");
+
+export default {
+  fetch(request, env, ctx) {
+    return telemetryHandler.fetch!(request, env, ctx);
+  },
+  scheduled(_event, env, ctx) {
+    ctx.waitUntil(recheckVerifiedZones(env));
+  },
+} satisfies ExportedHandler<Env>;

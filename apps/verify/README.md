@@ -13,7 +13,9 @@ have app-specific scopes.
 2. Add `_kitsos-verify.domain.de TXT "kitsos-verify=<token>"` at your DNS provider
 3. `POST /resources/:id/check-dns` → polls via Cloudflare DoH, marks
    verified platform-wide if the token matches
-4. Ownership remains verified until the resource is explicitly removed.
+4. A daily scheduled check confirms that the TXT token is still present.
+   If it was deliberately removed, the domain becomes unverified globally.
+   Resolver or network failures do not revoke a verified domain.
 
 **Magic link** (e.g. verifying an email address):
 
