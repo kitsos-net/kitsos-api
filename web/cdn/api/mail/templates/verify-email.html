@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Bestätige deine Verifizierung</title>
+  </head>
+  <body style="margin:0;padding:0;background:#f7f9fc;color:#111827;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:24px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f7f9fc;">
+      <tr>
+        <td align="center" style="padding:32px 16px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px;background:#ffffff;border:1px solid #dce5ee;border-radius:12px;">
+            <tr>
+              <td style="padding:32px 32px 8px;">
+                <img src="https://cdn.kitsos.net/logos/k.png" width="48" height="48" alt="Kitsos" style="display:block;border:0;width:48px;height:48px;">
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:16px 32px 32px;">
+                <h1 style="margin:0 0 16px;color:#111827;font-size:28px;line-height:36px;font-weight:700;">Bestätige deine Verifizierung</h1>
+                <p style="margin:0 0 16px;color:#52606d;">Du hast die Verifizierung für <strong style="color:#111827;word-break:break-word;">{{ resource }}</strong> angefordert.</p>
+                <p style="margin:0 0 24px;color:#52606d;">Bestätige mit dem folgenden Button, dass dir diese E-Mail-Adresse gehört.</p>
+                <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                  <tr>
+                    <td align="center" bgcolor="#0768bb" style="border-radius:10px;">
+                      <a href="{{ confirm_url }}" style="display:inline-block;padding:12px 16px;color:#ffffff;font-size:16px;font-weight:600;line-height:20px;text-decoration:none;">Verifizierung bestätigen</a>
+                    </td>
+                  </tr>
+                </table>
+                <p style="margin:24px 0 0;color:#52606d;font-size:14px;line-height:20px;">Falls du diese Anfrage nicht gestellt hast, kannst du diese E-Mail ignorieren.</p>
+                <p style="margin:16px 0 0;color:#52606d;font-size:14px;line-height:20px;word-break:break-word;">Funktioniert der Button nicht? Öffne diesen Link:<br><a href="{{ confirm_url }}" style="color:#0768bb;text-decoration:underline;">{{ confirm_url }}</a></p>
+              </td>
+            </tr>
+          </table>
+          <p style="margin:16px 0 0;color:#52606d;font-size:14px;line-height:20px;">&copy; Kitsos</p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

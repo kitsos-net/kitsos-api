@@ -20,6 +20,7 @@ const DNS_REVERIFY_DAYS = 30;
 const DNS_GRACE_DAYS = 7;
 const MAGIC_LINK_REVERIFY_DAYS = 90;
 const MAGIC_LINK_GRACE_DAYS = 14;
+const MAX_VERIFY_EMAILS_PER_DAY = 15;
 
 function id() {
   return crypto.randomUUID();
@@ -29,20 +30,21 @@ function daysFromNow(days: number): number {
 }
 
 async function findOrCreateResource(env: Env, appId: string, resourceType: string, value: string) {
-  const existing = await env.DB.prepare(
+  // The unique index added in 0005 makes this safe when two requests arrive
+  // at the same time.
+  await env.DB.prepare(
+    "INSERT OR IGNORE INTO resources (id, app_id, resource_type, value) VALUES (?, ?, ?, ?)"
+  )
+    .bind(id(), appId, resourceType, value)
+    .run();
+
+  const resource = await env.DB.prepare(
     "SELECT id FROM resources WHERE app_id = ? AND resource_type = ? AND value = ?"
   )
     .bind(appId, resourceType, value)
     .first<{ id: string }>();
-  if (existing) return existing.id;
-
-  const resourceId = id();
-  await env.DB.prepare(
-    "INSERT INTO resources (id, app_id, resource_type, value) VALUES (?, ?, ?, ?)"
-  )
-    .bind(resourceId, appId, resourceType, value)
-    .run();
-  return resourceId;
+  if (!resource) throw new Error("resource-create-failed");
+  return resource.id;
 }
 
 async function grantAccess(
@@ -53,10 +55,24 @@ async function grantAccess(
   scopes: string[]
 ) {
   await env.DB.prepare(
-    "INSERT INTO resource_grants (id, resource_id, user_id, scopes) VALUES (?, ?, ?, ?)"
+    "INSERT OR IGNORE INTO resource_grants (id, resource_id, user_id, scopes) VALUES (?, ?, ?, ?)"
   )
     .bind(id(), resourceId, userId, JSON.stringify(scopes))
     .run();
+}
+
+/** Fixed UTC-day budget for verification email delivery. A per-user
+ * usage_limits row can raise this default after an approved request. */
+async function checkAndIncrementVerifyEmailLimit(env: Env, userId: string): Promise<{ allowed: boolean; maxPerDay: number }> {
+  const configured = await getUsageLimit(env, userId, "verify", "verification_emails_per_day");
+  const maxPerDay = configured ?? MAX_VERIFY_EMAILS_PER_DAY;
+  const dayBucket = Math.floor(Date.now() / 1000 / 86400);
+  const key = `verify:email:${userId}:${dayBucket}`;
+  const current = await env.USAGE_COUNTERS.get(key);
+  const count = current ? Number.parseInt(current, 10) : 0;
+  if (count >= maxPerDay) return { allowed: false, maxPerDay };
+  await env.USAGE_COUNTERS.put(key, String(count + 1), { expirationTtl: 172800 });
+  return { allowed: true, maxPerDay };
 }
 
 async function canVerifyResource(env: Env, userId: string, resourceId: string): Promise<boolean> {
@@ -86,6 +102,7 @@ resources.use("*", async (c, next) => {
   const path = new URL(c.req.url).pathname;
   const scope = c.req.method === "GET" ? "verify:resource:read"
     : c.req.method === "POST" && path.endsWith("/check-dns") ? "verify:resource:verify"
+    : c.req.method === "DELETE" ? "verify:resource:delete"
     : "verify:resource:create";
   return requireUser(scope)(c, next);
 });
@@ -145,13 +162,51 @@ resources.post("/", async (c) => {
   let resourceId: string;
   let verificationId: string;
   const token = generateVerificationToken();
-  verificationId = id();
 
   try {
     resourceId = await findOrCreateResource(c.env, body.appId!, body.resourceType!, body.value!);
+
+    const verification = await c.env.DB.prepare(
+      `SELECT id, verified_at FROM resource_verifications
+       WHERE resource_id = ? AND user_id = ?`
+    )
+      .bind(resourceId, userId)
+      .first<{ id: string; verified_at: number | null }>();
+
+    if (verification?.verified_at) {
+      return c.json({ error: "resource-already-verified", resourceId, verificationId: verification.id }, 409);
+    }
+
+    verificationId = verification?.id ?? id();
+
+    // Only count an email that can actually be sent. DNS-TXT checks do not
+    // consume this budget, and a missing profile email does not either.
+    if (method === "magic_link") {
+      const user = await c.env.DB.prepare("SELECT email FROM users WHERE id = ?")
+        .bind(userId)
+        .first<{ email: string }>();
+      if (!user?.email) {
+        return c.json({ resourceId, verificationId, emailSent: false, emailError: "no-user-email-on-file" }, 201);
+      }
+      const limit = await checkAndIncrementVerifyEmailLimit(c.env, userId);
+      if (!limit.allowed) {
+        return c.json({ error: "verify-email-daily-limit-exceeded", maxPerDay: limit.maxPerDay }, 429);
+      }
+    }
+
+    // Re-sending or switching methods replaces the one pending attempt. It
+    // cannot create another resource/grant row for the same user and value.
     await c.env.DB.prepare(
       `INSERT INTO resource_verifications (id, resource_id, user_id, method, token, pending_scopes)
-       VALUES (?, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(resource_id, user_id) DO UPDATE SET
+         method = excluded.method,
+         token = excluded.token,
+         pending_scopes = excluded.pending_scopes,
+         verified_at = NULL,
+         reverify_due_at = NULL,
+         grace_expires_at = NULL,
+         created_at = unixepoch()`
     )
       .bind(verificationId, resourceId, userId, method, token, JSON.stringify(body.scopes))
       .run();
@@ -171,7 +226,7 @@ resources.post("/", async (c) => {
     }, 201);
   }
 
-  // magic_link — user's email comes from their `users` row
+  // magic_link — the user was checked before the pending attempt was saved.
   const user = await c.env.DB.prepare("SELECT email FROM users WHERE id = ?")
     .bind(userId)
     .first<{ email: string }>();
@@ -191,6 +246,35 @@ resources.post("/", async (c) => {
     emailSent: result.ok,
     emailError: result.ok ? undefined : result.error,
   }, 201);
+});
+
+// A user removes only their own verified ownership claim. If no other user
+// has a verification for the shared resource, remove the resource itself too.
+resources.delete("/:resourceId", async (c) => {
+  const userId = c.get("userId");
+  const resourceId = c.req.param("resourceId");
+  const verification = await c.env.DB.prepare(
+    `SELECT id FROM resource_verifications
+     WHERE resource_id = ? AND user_id = ? AND verified_at IS NOT NULL`
+  )
+    .bind(resourceId, userId)
+    .first();
+  if (!verification) return c.json({ error: "verified-resource-not-found" }, 404);
+
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM resource_grants WHERE resource_id = ? AND user_id = ?").bind(resourceId, userId),
+    c.env.DB.prepare("DELETE FROM resource_verifications WHERE resource_id = ? AND user_id = ?").bind(resourceId, userId),
+  ]);
+
+  const remaining = await c.env.DB.prepare(
+    "SELECT 1 FROM resource_verifications WHERE resource_id = ? LIMIT 1"
+  )
+    .bind(resourceId)
+    .first();
+  if (!remaining) {
+    await c.env.DB.prepare("DELETE FROM resources WHERE id = ?").bind(resourceId).run();
+  }
+  return c.body(null, 204);
 });
 
 // Check a pending DNS-TXT verification

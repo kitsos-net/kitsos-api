@@ -27,6 +27,22 @@ produces.
    no auth — the token itself is the credential) → marks verified +
    creates the grant
 3. Re-verification due after 90 days, 14-day grace period
+4. Delivery is limited to 15 emails per UTC day by default. Users can request
+   a higher `verification_emails_per_day` limit through the Keys API's
+   `/me/limit-increase-requests` endpoint; it takes effect after approval.
+
+## Resource lifecycle
+
+- A user has at most one verification attempt and one grant per resource.
+  Starting another pending attempt replaces its token instead of creating a
+  duplicate.
+- `DELETE /resources/:id` removes the caller's verified ownership claim and
+  associated grant. It requires `verify:resource:delete`; claims owned by
+  other users are left untouched.
+- The magic-link email source is
+  `web/cdn/api/mail/templates/verify-email.html`, published as
+  `https://cdn.kitsos.net/api/mail/templates/verify-email.html`. The internal
+  Mail endpoint fetches it with the `resource` and `confirm_url` variables.
 
 ## Known gaps
 
@@ -37,6 +53,5 @@ produces.
 - No cron job yet to warn users before `reverify_due_at` /
   auto-expire grants past `grace_expires_at` — that's the planned
   `cron` worker's job
-- No rate limiting on `/resources` POST — someone could hammer DNS
-  lookups; add via `@kitsos/auth`'s `checkRateLimit` before this is
-  public-facing beyond your own use
+- Magic-link delivery has a daily budget, but DNS verification creation and
+  lookup requests do not yet have a short-window request-rate limit

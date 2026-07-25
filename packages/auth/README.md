@@ -28,6 +28,9 @@ worker — imported directly into each app (`dns-manager`, `hide-my-email`,
    narrow a key to individual resources (currently used for mail templates).
 7. **Audit log** — every allow/deny decision is written to
    `audit_log`, fire-and-forget so it never blocks the request.
+8. **Per-user observability** — authenticated request spans include internal
+   user, API-key, auth-method and scope identifiers for exact success/error
+   aggregation in Axiom. See `docs/axiom-api-usage.md`.
 
 ## Typical app worker
 
@@ -69,7 +72,7 @@ during the original design discussion — see [[kitsos-api-platform]].
 - Mail: `mail:send`, `mail:template:read|write|delete`,
   `mail:webhook:read|write|delete`
 - Hide My Email: `hme:read|create|edit|delete`
-- Verify: `verify:resource:read|create|verify`
+- Verify: `verify:resource:read|create|verify|delete`
 
 The legacy `*:manage` scopes remain accepted only for existing keys; issue the
 granular scopes for new keys.
