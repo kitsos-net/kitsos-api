@@ -25,6 +25,7 @@ Replace `YOUR_AXIOM_DATASET` in the queries below with the value of
 
 ```apl
 ['YOUR_AXIOM_DATASET']
+| where ['kind'] == "server"
 | extend
     user_id = tostring(['attributes.custom']['kitsos.user.id']),
     api = tostring(['service.name']),
@@ -45,6 +46,7 @@ For a dashboard table, format `success_rate` as a percentage.
 
 ```apl
 ['YOUR_AXIOM_DATASET']
+| where ['kind'] == "server"
 | extend
     user_id = tostring(['attributes.custom']['kitsos.user.id']),
     api = tostring(['service.name']),
@@ -62,6 +64,7 @@ For a dashboard table, format `success_rate` as a percentage.
 
 ```apl
 ['YOUR_AXIOM_DATASET']
+| where ['kind'] == "server"
 | extend
     user_id = tostring(['attributes.custom']['kitsos.user.id']),
     api = tostring(['service.name']),
@@ -77,6 +80,7 @@ For a dashboard table, format `success_rate` as a percentage.
 
 ```apl
 ['YOUR_AXIOM_DATASET']
+| where ['kind'] == "server"
 | extend
     user_id = tostring(['attributes.custom']['kitsos.user.id']),
     api = tostring(['service.name']),
@@ -90,10 +94,11 @@ For a dashboard table, format `success_rate` as a percentage.
 
 ## Axiom dashboard
 
-In Axiom, run the first query and choose **More → Add to dashboard**. Add the
-daily query as a stacked time-series chart and the endpoint query as a table.
-Use dashboard filters for `user_id` and `api`. Axiom's existing OpenTelemetry
-Traces dashboard remains useful for opening the underlying traces.
+The shared Axiom dashboard **API Usage by User** has the stable UID
+`api-usage-by-user`. It contains headline request, success, error, and active
+user statistics; API and outcome trends; and per-user/API and endpoint tables.
+Axiom's existing OpenTelemetry Traces dashboard remains useful for opening the
+underlying traces.
 
 The counts are not sampled: telemetry explicitly uses a `1.0` head-sampling
 ratio. As with any external telemetry system, requests can only be counted
