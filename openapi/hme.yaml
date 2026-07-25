@@ -4,8 +4,8 @@ info:
   summary: Create and manage protected forwarding aliases.
   description: >
     Create and manage random forwarding aliases at hme.kitsos.net.
-    A forwarding destination must first be verified as an email_address
-    resource grant with the hme:receive scope.
+    A forwarding destination must first be verified as an email_address.
+    That ownership verification is shared across every Kitsos API.
   version: "0.1.0"
   contact: { name: Kitsos Support, url: "https://kitsos.net/contact", email: support@services.kitsos.net }
   license: { name: Proprietary, url: "https://kitsos.net/terms" }
@@ -71,7 +71,7 @@ components:
         forwardTo:
           type: string
           format: email
-          description: A verified email_address resource grant with hme:receive scope.
+          description: An email address whose ownership this user verified through the Kitsos Verify API.
         label:
           type: string
           nullable: true
@@ -105,7 +105,7 @@ components:
         forwardTo:
           type: string
           format: email
-          description: A verified email_address resource grant with hme:receive scope.
+          description: An email address whose ownership this user verified through the Kitsos Verify API.
     Error:
       type: object
       required: [error]
@@ -178,7 +178,7 @@ paths:
               schema: { $ref: '#/components/schemas/CreateAliasResponse' }
         "401": { $ref: '#/components/responses/Unauthorized' }
         "403":
-          description: The forwarding destination is not granted for hme:receive.
+          description: The forwarding destination has not been verified by this user.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -209,7 +209,7 @@ paths:
         "204": { description: Alias updated, or no fields were supplied. }
         "401": { $ref: '#/components/responses/Unauthorized' }
         "403":
-          description: The new forwarding destination is not granted for hme:receive.
+          description: The new forwarding destination has not been verified by this user.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

@@ -123,29 +123,24 @@ export async function checkResourceGrant(
   context: AuthContext,
   resourceType: string,
   value: string,
-  scope: string
+  _scope: string
 ): Promise<CheckResult> {
-  const now = Date.now() / 1000;
-  // Resource ownership is platform-wide. A domain or email verified once can
-  // be granted further API scopes without issuing another challenge.
-  const grants = await env.DB.prepare(
-    `SELECT rg.scopes
+  const normalizedValue = resourceType === "zone"
+    ? value.trim().toLowerCase().replace(/\.$/, "")
+    : value.trim().toLowerCase();
+  // API-key scopes decide which operation is allowed. Resource verification
+  // only proves ownership and is therefore valid platform-wide.
+  const verification = await env.DB.prepare(
+    `SELECT 1
      FROM resources r
-     JOIN resource_grants rg ON rg.resource_id = r.id AND rg.user_id = ?
-     JOIN resource_verifications rv ON rv.resource_id = r.id AND rv.user_id = rg.user_id
+     JOIN resource_verifications rv ON rv.resource_id = r.id AND rv.user_id = ?
      WHERE r.resource_type = ? AND r.value = ?
-       AND rv.verified_at IS NOT NULL
-       AND (rv.grace_expires_at IS NULL OR rv.grace_expires_at >= ?)`
+       AND rv.verified_at IS NOT NULL`
   )
-    .bind(context.userId, resourceType, value, now)
-    .all<{ scopes: string }>();
+    .bind(context.userId, resourceType, normalizedValue)
+    .first();
 
-  if (grants.results.length === 0) return { allowed: false, status: 403, reason: "resource-not-granted" };
-
-  const grantedScopes = new Set(grants.results.flatMap((grant) => JSON.parse(grant.scopes) as string[]));
-  if (!grantedScopes.has(scope)) {
-    return { allowed: false, status: 403, reason: "resource-scope-missing" };
-  }
+  if (!verification) return { allowed: false, status: 403, reason: "resource-not-verified" };
 
   return { allowed: true, status: 200 };
 }
