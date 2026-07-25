@@ -6,8 +6,7 @@ SET resource_id = (
   SELECT canonical.id
   FROM resources AS duplicate
   JOIN resources AS canonical
-    ON canonical.app_id = duplicate.app_id
-   AND canonical.resource_type = duplicate.resource_type
+    ON canonical.resource_type = duplicate.resource_type
    AND canonical.value = duplicate.value
   WHERE duplicate.id = resource_verifications.resource_id
   ORDER BY canonical.created_at ASC, canonical.id ASC
@@ -22,8 +21,7 @@ SET resource_id = (
   SELECT canonical.id
   FROM resources AS duplicate
   JOIN resources AS canonical
-    ON canonical.app_id = duplicate.app_id
-   AND canonical.resource_type = duplicate.resource_type
+    ON canonical.resource_type = duplicate.resource_type
    AND canonical.value = duplicate.value
   WHERE duplicate.id = resource_grants.resource_id
   ORDER BY canonical.created_at ASC, canonical.id ASC
@@ -38,7 +36,7 @@ WHERE id NOT IN (
   SELECT canonical_id FROM (
     SELECT id AS canonical_id,
            ROW_NUMBER() OVER (
-             PARTITION BY app_id, resource_type, value
+             PARTITION BY resource_type, value
              ORDER BY created_at ASC, id ASC
            ) AS position
     FROM resources
@@ -61,6 +59,20 @@ WHERE id NOT IN (
   WHERE position = 1
 );
 
+-- Preserve the union of every historically granted scope before collapsing
+-- duplicate grant rows.
+UPDATE resource_grants AS target
+SET scopes = (
+  SELECT json_group_array(scope)
+  FROM (
+    SELECT DISTINCT json_each.value AS scope
+    FROM resource_grants AS source, json_each(source.scopes)
+    WHERE source.resource_id = target.resource_id
+      AND source.user_id = target.user_id
+    ORDER BY scope
+  )
+);
+
 DELETE FROM resource_grants
 WHERE id NOT IN (
   SELECT id FROM (
@@ -74,8 +86,9 @@ WHERE id NOT IN (
   WHERE position = 1
 );
 
-CREATE UNIQUE INDEX idx_resources_app_type_value_unique
-  ON resources(app_id, resource_type, value);
+DROP INDEX IF EXISTS idx_resources_type_value;
+CREATE UNIQUE INDEX idx_resources_type_value_unique
+  ON resources(resource_type, value);
 CREATE UNIQUE INDEX idx_resource_verifications_resource_user_unique
   ON resource_verifications(resource_id, user_id);
 CREATE UNIQUE INDEX idx_resource_grants_resource_user_unique
