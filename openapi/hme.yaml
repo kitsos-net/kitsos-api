@@ -1,13 +1,18 @@
 openapi: 3.0.3
 info:
   title: Kitsos Hide My Email API
+  summary: Create and manage protected forwarding aliases.
   description: >
     Create and manage random forwarding aliases at hme.kitsos.net.
     A forwarding destination must first be verified as an email_address
     resource grant with the hme:receive scope.
   version: "0.1.0"
+  contact: { name: Kitsos Support, url: "https://kitsos.net/contact", email: support@services.kitsos.net }
+  license: { name: Proprietary, url: "https://kitsos.net/terms" }
 servers:
   - url: https://hme.api.kitsos.net
+    description: Production
+externalDocs: { description: Kitsos API documentation, url: "https://docs.api.kitsos.net" }
 
 tags:
   - name: Default
@@ -128,6 +133,7 @@ paths:
     get:
       tags: [Default]
       summary: Health check
+      operationId: getHmeHealth
       security: []
       responses:
         "200":
@@ -144,6 +150,7 @@ paths:
     get:
       tags: [Aliases]
       summary: List your aliases
+      operationId: getAliases
       responses:
         "200":
           description: Aliases owned by the authenticated API-key user, newest first.
@@ -157,6 +164,7 @@ paths:
     post:
       tags: [Aliases]
       summary: Create a random forwarding alias
+      operationId: postAliases
       requestBody:
         required: true
         content:
@@ -190,6 +198,7 @@ paths:
     patch:
       tags: [Aliases]
       summary: Update an alias
+      operationId: patchAlias
       description: Enable or disable an alias, change its label, or change its forwarding destination.
       requestBody:
         required: true
@@ -207,6 +216,7 @@ paths:
     delete:
       tags: [Aliases]
       summary: Delete an alias
+      operationId: deleteAlias
       responses:
         "204": { description: Alias deleted. }
         "401": { $ref: '#/components/responses/Unauthorized' }
