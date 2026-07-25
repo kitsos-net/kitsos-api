@@ -1,15 +1,30 @@
 openapi: 3.0.3
 info:
   title: Kitsos Verify API
-  description: >
+  description: |
     Resource ownership verification (DNS-TXT or magic link) — the gate
     before any resource_grants row gets created. Every route except
     the health check and the magic-link confirm endpoint requires a
-    Clerk session (no API-key auth path — verification is a human,
-    in-browser action).
+    Kitsos API key with a verify:resource:* scope. Admin routes require
+    a Clerk session belonging to the configured admin group.
   version: "0.1.0"
+  contact:
+    name: Kitsos
+    url: 'https://kitsos.net/contact'
+    email: support@services.kitsos.net
+  termsOfService: 'https://kitsos.net/terms'
+  license:
+    name: Proprietary
+    url: 'https://kitsos.net/terms'
 servers:
-  - url: https://verify.api.kitsos.net
+  - url: 'https://verify.api.kitsos.net'
+tags:
+  - name: Default
+    description: Health check.
+  - name: Resources
+    description: Register and verify owned resources.
+  - name: Admin
+    description: Administrative resource management.
 
 components:
   securitySchemes:
@@ -17,6 +32,12 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+      description: Clerk session JWT for admin endpoints.
+    apiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: Kitsos API key
+      description: Kitsos API key with verify:resource:read, verify:resource:create, or verify:resource:verify.
   schemas:
     ResourceVerification:
       type: object
@@ -34,13 +55,13 @@ components:
       properties:
         error: { type: string }
 
-security:
-  - clerkSession: []
-
 paths:
   /health:
     get:
       summary: Health check
+      description: "Health check."
+      operationId: getHealth
+      tags: [Default]
       security: []
       responses:
         "200": { description: OK }
@@ -48,6 +69,10 @@ paths:
   /resources:
     get:
       summary: List your own resources and their verification status
+      description: "List your own resources and their verification status."
+      operationId: getResources
+      tags: [Resources]
+      security: [{ apiKey: [] }]
       responses:
         "200":
           description: OK
@@ -56,6 +81,10 @@ paths:
               schema: { type: array, items: { $ref: '#/components/schemas/ResourceVerification' } }
     post:
       summary: Register a resource and start a verification attempt
+      description: "Register a resource and start a verification attempt."
+      operationId: postResources
+      tags: [Resources]
+      security: [{ apiKey: [] }]
       requestBody:
         required: true
         content:
@@ -93,8 +122,12 @@ paths:
   /resources/{resourceId}/check-dns:
     post:
       summary: Check a pending DNS-TXT verification via Cloudflare DoH; creates the resource_grants row on success
+      description: "Check a pending DNS-TXT verification via Cloudflare DoH; creates the resource_grants row on success."
+      operationId: postResourcesResourceidCheckDns
+      tags: [Resources]
+      security: [{ apiKey: [] }]
       parameters:
-        - { name: resourceId, in: path, required: true, schema: { type: string } }
+        - { name: resourceId, in: path, required: true, schema: { type: string }, description: "Path parameter resourceId." }
       responses:
         "200":
           description: Result of the check (verified true/false)
@@ -113,10 +146,13 @@ paths:
   /resources/{resourceId}/confirm:
     get:
       summary: Confirm a magic-link verification (public — the token itself is the credential, no Clerk session required)
+      description: "Confirm a magic-link verification (public — the token itself is the credential, no Clerk session required)."
+      operationId: getResourcesResourceidConfirm
+      tags: [Resources]
       security: []
       parameters:
-        - { name: resourceId, in: path, required: true, schema: { type: string } }
-        - { name: token, in: query, required: true, schema: { type: string } }
+        - { name: resourceId, in: path, required: true, schema: { type: string }, description: "Path parameter resourceId." }
+        - { name: token, in: query, required: true, schema: { type: string }, description: "Query parameter token." }
       responses:
         "200":
           description: Verified — resource_grants row created
@@ -127,13 +163,21 @@ paths:
   /admin/resources:
     get:
       summary: List all resources across all users (admin only)
+      description: "List all resources across all users (admin only)."
+      operationId: getAdminResources
+      tags: [Admin]
+      security: [{ clerkSession: [] }]
       responses:
         "200": { description: OK }
 
   /admin/resources/{resourceId}:
     delete:
       summary: Delete a resource and its verifications/grants (admin only)
+      description: "Delete a resource and its verifications/grants (admin only)."
+      operationId: deleteAdminResourcesResourceid
+      tags: [Admin]
+      security: [{ clerkSession: [] }]
       parameters:
-        - { name: resourceId, in: path, required: true, schema: { type: string } }
+        - { name: resourceId, in: path, required: true, schema: { type: string }, description: "Path parameter resourceId." }
       responses:
         "204": { description: No Content }

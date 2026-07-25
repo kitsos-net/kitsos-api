@@ -1,13 +1,23 @@
 openapi: 3.0.3
 info:
   title: Kitsos Utility API
+  description: |
+    Unified Crypt, Time, Geo and DNS utility API. Requests without a key are limited to 5/minute per IP; authenticated keys receive higher app-level limits.
   version: 1.0.0
-  description: Unified Crypt, Time, Geo and DNS utility API. Requests without a key are limited to 5/minute per IP; authenticated keys receive higher app-level limits.
+  contact:
+    name: Kitsos
+    url: 'https://kitsos.net/contact'
+    email: support@services.kitsos.net
+  termsOfService: 'https://kitsos.net/terms'
+  license:
+    name: Proprietary
+    url: 'https://kitsos.net/terms'
 servers:
-  - url: https://utility.api.kitsos.net
+  - url: 'https://utility.api.kitsos.net'
 tags:
-  - { name: Crypt, description: Secure password, token, number and hash operations. }
-  - { name: Time, description: Current time, custom timezone formatting and timezone list. }
+  - { name: Default, description: Health check. }
+  - { name: Crypt, description: 'Secure password, token, number and hash operations.' }
+  - { name: Time, description: 'Current time, custom timezone formatting and timezone list.' }
   - { name: Geo, description: Request-IP geolocation supplied by Cloudflare. }
   - { name: DNS, description: Recursive and public-provider DNS lookups. }
 x-tagGroups:
@@ -37,10 +47,12 @@ components:
       in: query
       required: true
       schema: { type: string, example: example.com }
+      description: Fully qualified domain name to resolve.
     DnsType:
       name: type
       in: query
       schema: { type: string, enum: [A, AAAA, NS, CNAME, SOA, TXT], default: A }
+      description: DNS record type to resolve.
   responses:
     PublicRateLimit:
       description: Public request budget exhausted. Use a Kitsos API key for higher limits.
@@ -53,14 +65,25 @@ components:
       description: Invalid request parameters.
       content: { text/plain: { schema: { type: string } } }
 paths:
+  /health:
+    get:
+      tags: [Default]
+      summary: Health check
+      description: Returns the current availability of the Utility API.
+      operationId: getUtilityHealth
+      security: []
+      responses:
+        '200': { description: Utility API is available }
   /crypt/pass:
     get:
       tags: [Crypt]
       summary: Generate a secure password
+      description: "Generate a secure password."
+      operationId: getCryptPass
       security: [{}, { kitsosApiKey: [] }]
       parameters:
         - { $ref: '#/components/parameters/PublicAuth' }
-        - { name: len, in: query, schema: { type: integer, minimum: 1, maximum: 16384, default: 20 } }
+        - { name: len, in: query, schema: { type: integer, minimum: 1, maximum: 16384, default: 20 }, description: "Query parameter len." }
         - { name: symbols, in: query, schema: { type: boolean, default: false }, description: Include the full symbol set; presence enables it for legacy compatibility. }
         - { name: strong, in: query, schema: { type: boolean, default: false }, description: Include the compact basic symbol set. }
       responses: { '200': { description: Password, content: { text/plain: { schema: { type: string } } } }, '400': { $ref: '#/components/responses/BadRequest' }, '429': { $ref: '#/components/responses/PublicRateLimit' } }
@@ -68,6 +91,8 @@ paths:
     get:
       tags: [Crypt]
       summary: Generate a cryptographic token
+      description: "Generate a cryptographic token."
+      operationId: getCryptToken
       security: [{}, { kitsosApiKey: [] }]
       parameters:
         - { $ref: '#/components/parameters/PublicAuth' }
@@ -78,16 +103,20 @@ paths:
     get:
       tags: [Crypt]
       summary: Generate a random integer in an inclusive range
+      description: "Generate a random integer in an inclusive range."
+      operationId: getCryptNum
       security: [{}, { kitsosApiKey: [] }]
       parameters:
         - { $ref: '#/components/parameters/PublicAuth' }
-        - { name: min, in: query, schema: { type: integer, default: 0 } }
-        - { name: max, in: query, schema: { type: integer, default: 100 } }
+        - { name: min, in: query, schema: { type: integer, default: 0 }, description: "Query parameter min." }
+        - { name: max, in: query, schema: { type: integer, default: 100 }, description: "Query parameter max." }
       responses: { '200': { description: Integer, content: { text/plain: { schema: { type: string } } } }, '400': { $ref: '#/components/responses/BadRequest' }, '429': { $ref: '#/components/responses/PublicRateLimit' } }
   /crypt/hash:
     get:
       tags: [Crypt]
       summary: Hash text
+      description: "Hash text."
+      operationId: getCryptHash
       security: [{}, { kitsosApiKey: [] }]
       parameters:
         - { $ref: '#/components/parameters/PublicAuth' }
@@ -98,49 +127,63 @@ paths:
     get:
       tags: [Crypt]
       summary: Plain-text Crypt help
+      description: "Plain-text Crypt help."
+      operationId: getCryptHelp
       security: [{}, { kitsosApiKey: [] }]
       responses: { '200': { description: Help, content: { text/plain: { schema: { type: string } } } } }
   /time:
     get:
       tags: [Time]
       summary: Get current time for caller location or an IANA timezone
+      description: "Get current time for caller location or an IANA timezone."
+      operationId: getTime
       security: [{}, { kitsosApiKey: [] }]
       parameters:
         - { $ref: '#/components/parameters/PublicAuth' }
-        - { name: tz, in: query, schema: { type: string, example: Europe/Berlin }, description: IANA timezone. Defaults to Cloudflare IP timezone, then UTC. }
+        - { name: tz, in: query, schema: { type: string, example: Europe/Berlin }, description: 'IANA timezone. Defaults to Cloudflare IP timezone, then UTC.' }
         - { name: format, in: query, schema: { type: string, example: '{d}.{m}.{Y} {H}:{M}' }, description: 'Optional plain-text format with {Y}, {m}, {d}, {H}, {M}, {S}.' }
       responses: { '200': { description: JSON response unless format is supplied }, '400': { $ref: '#/components/responses/BadRequest' }, '429': { $ref: '#/components/responses/PublicRateLimit' } }
   /time/zones:
     get:
       tags: [Time]
       summary: List supported IANA timezone identifiers
+      description: "List supported IANA timezone identifiers."
+      operationId: getTimeZones
       security: [{}, { kitsosApiKey: [] }]
       responses: { '200': { description: Newline-separated timezone list, content: { text/plain: { schema: { type: string } } } } }
   /time/help:
     get:
       tags: [Time]
       summary: Plain-text Time help
+      description: "Plain-text Time help."
+      operationId: getTimeHelp
       security: [{}, { kitsosApiKey: [] }]
       responses: { '200': { description: Help, content: { text/plain: { schema: { type: string } } } } }
   /geo:
     get:
       tags: [Geo]
       summary: Get caller geolocation and network metadata
+      description: "Get caller geolocation and network metadata."
+      operationId: getGeo
       security: [{}, { kitsosApiKey: [] }]
       parameters:
         - { $ref: '#/components/parameters/PublicAuth' }
-        - { name: format, in: query, schema: { type: string, enum: [json, txt], default: json } }
+        - { name: format, in: query, schema: { type: string, enum: [json, txt], default: json }, description: "Query parameter format." }
       responses: { '200': { description: Location response }, '429': { $ref: '#/components/responses/PublicRateLimit' } }
   /geo/help:
     get:
       tags: [Geo]
       summary: Plain-text Geo help
+      description: "Plain-text Geo help."
+      operationId: getGeoHelp
       security: [{}, { kitsosApiKey: [] }]
       responses: { '200': { description: Help, content: { text/plain: { schema: { type: string } } } } }
   /dns:
     get:
       tags: [DNS]
       summary: Resolve DNS through the default recursive resolver
+      description: "Resolve DNS through the default recursive resolver."
+      operationId: getDns
       security: [{}, { kitsosApiKey: [] }]
       parameters:
         - { $ref: '#/components/parameters/PublicAuth' }
@@ -152,17 +195,21 @@ paths:
     get:
       tags: [DNS]
       summary: Resolve DNS through a named public provider
+      description: "Resolve DNS through a named public provider."
+      operationId: getDnsProvider
       security: [{}, { kitsosApiKey: [] }]
       parameters:
         - { $ref: '#/components/parameters/PublicAuth' }
-        - { name: provider, in: path, required: true, schema: { type: string, enum: [google, cloudflare, quad9] } }
+        - { name: provider, in: path, required: true, schema: { type: string, enum: [google, cloudflare, quad9] }, description: "Path parameter provider." }
         - { $ref: '#/components/parameters/DnsName' }
         - { $ref: '#/components/parameters/DnsType' }
-        - { name: cache, in: query, schema: { type: boolean, default: true } }
+        - { name: cache, in: query, schema: { type: boolean, default: true }, description: "Query parameter cache." }
       responses: { '200': { description: DNS response sections }, '400': { description: Invalid domain or record type }, '404': { description: Unknown provider }, '502': { description: DNS upstream failure }, '429': { $ref: '#/components/responses/PublicRateLimit' } }
   /dns/help:
     get:
       tags: [DNS]
       summary: Plain-text DNS help
+      description: "Plain-text DNS help."
+      operationId: getDnsHelp
       security: [{}, { kitsosApiKey: [] }]
       responses: { '200': { description: Help, content: { text/plain: { schema: { type: string } } } } }

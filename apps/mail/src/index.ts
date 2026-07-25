@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { authenticate, checkResourceGrant, checkKeyResourceAccess, checkRateLimit, checkUsageLimitForUser, getUsageLimit, sha256Hex, withRetryAfter } from "@kitsos/auth";
 import { withTelemetry } from "@kitsos/telemetry";
 import { resolvePayload } from "./dotpath";
@@ -12,6 +13,13 @@ const VERIFICATION_SCOPE = "mail:send:verification";
 
 type Vars = { userId: string };
 const app = new Hono<{ Bindings: Env; Variables: Vars }>();
+
+// Required for Swagger UI and browser clients hosted on a different domain.
+app.use("*", cors({
+  origin: "*",
+  allowHeaders: ["Authorization", "Content-Type", "X-Webhook-Secret"],
+  allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+}));
 
 function id() {
   return crypto.randomUUID();
