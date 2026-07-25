@@ -62,6 +62,14 @@ function passwordCharset(params: URLSearchParams) {
   return chars;
 }
 function randomUint32() { return crypto.getRandomValues(new Uint32Array(1))[0]; }
+function randomIntInclusive(min: number, max: number) {
+  const range = max - min + 1;
+  const maxUint32Exclusive = 0x1_0000_0000;
+  const unbiasedLimit = Math.floor(maxUint32Exclusive / range) * range;
+  let value = randomUint32();
+  while (value >= unbiasedLimit) value = randomUint32();
+  return min + (value % range);
+}
 
 app.get("/crypt/pass", async (c) => {
   const denied = await authorize(c, "utility:crypt"); if (denied) return denied;
@@ -86,7 +94,7 @@ app.get("/crypt/num", async (c) => {
   const denied = await authorize(c, "utility:crypt"); if (denied) return denied;
   const min = int(c.req.query("min"), 0); const max = int(c.req.query("max"), 100);
   if (min === null || max === null || min > max || max - min > 4_294_967_295) return text(c, "Fehler: ungültiger Zahlenbereich", 400);
-  return text(c, String(min + (randomUint32() % (max - min + 1))));
+  return text(c, String(randomIntInclusive(min, max)));
 });
 
 app.get("/crypt/hash", async (c) => {

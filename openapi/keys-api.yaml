@@ -1,58 +1,38 @@
 openapi: 3.0.3
 info:
   title: Kitsos Keys API
-  description: |
-    Management API for the Kitsos API platform — users, groups, apps,
-    policies, API keys, usage limits, and audit log.
+  summary: Self-service API for Kitsos accounts and API keys.
+  description: >
+    Create and manage your own API keys and request usage-limit increases.
+    Administrative platform endpoints are deliberately documented separately
+    in the Kitsos Keys Admin API.
   version: "0.1.0"
   contact:
-    name: Kitsos
-    url: 'https://kitsos.net/contact'
+    name: Kitsos Support
+    url: https://kitsos.net/contact
     email: support@services.kitsos.net
-  termsOfService: 'https://kitsos.net/terms'
   license:
     name: Proprietary
-    url: 'https://kitsos.net/terms'
+    url: https://kitsos.net/terms
 servers:
-  - url: 'https://keys.api.kitsos.net'
+  - url: https://keys.api.kitsos.net
+    description: Production
+externalDocs:
+  description: Kitsos API documentation
+  url: https://docs.api.kitsos.net
 tags:
   - name: Default
-    description: Health check
-  - name: self-service
-    description: Manage your Kitsos API account and create API keys.
-  - name: admin
-    description: Admin endpoints to manage the platform.
-
+    description: Service availability.
+  - name: Self-service
+    description: Manage your Kitsos account and API keys.
 components:
   securitySchemes:
     clerkSession:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: Clerk session JWT. Required for all endpoints — admin endpoints additionally require membership in the admin group.
+      description: Clerk session JWT for the currently signed-in user.
   schemas:
-    App:
-      type: object
-      properties:
-        id: { type: string }
-        name: { type: string }
-        description: { type: string, nullable: true }
-        environment: { type: string, enum: [production, staging, dev] }
-        created_at: { type: integer }
-    Group:
-      type: object
-      properties:
-        id: { type: string }
-        name: { type: string }
-        description: { type: string, nullable: true }
-    Policy:
-      type: object
-      properties:
-        id: { type: string }
-        appId: { type: string }
-        subjectType: { type: string, enum: [user, group] }
-        subjectId: { type: string }
-        scopes: { type: array, items: { type: string } }
     ApiKey:
       type: object
       properties:
@@ -70,480 +50,77 @@ components:
         - $ref: '#/components/schemas/ApiKey'
         - type: object
           properties:
-            key:
-              type: string
-              description: Raw API key — shown only once, at creation time.
-    UsageLimit:
-      type: object
-      properties:
-        id: { type: string }
-        userId: { type: string }
-        appId: { type: string }
-        limitType: { type: string }
-        limitValue: { type: integer }
-        isOverride: { type: boolean }
-    LimitIncreaseRequest:
-      type: object
-      properties:
-        id: { type: string }
-        user_id: { type: string }
-        app_id: { type: string }
-        limit_type: { type: string }
-        requested_value: { type: integer }
-        reason: { type: string, nullable: true }
-        status: { type: string, enum: [pending, approved, denied] }
-    AuditLogEntry:
-      type: object
-      properties:
-        id: { type: string }
-        user_id: { type: string, nullable: true }
-        app_id: { type: string, nullable: true }
-        action: { type: string }
-        result: { type: string, enum: [allowed, denied] }
-        reason: { type: string, nullable: true }
-        created_at: { type: integer }
+            key: { type: string, description: Raw API key — shown only once, at creation time. }
     Error:
       type: object
       properties:
         error: { type: string }
-
 security:
   - clerkSession: []
-
 paths:
   /health:
     get:
+      tags: [Default]
       summary: Health check
       description: Returns the current availability of the Keys API.
       operationId: getKeysHealth
-      tags: [Default]
       security: []
       responses:
         "200": { description: OK }
-
-  /admin/apps:
-    get:
-      summary: List all apps
-      description: "List all apps."
-      operationId: getAdminApps
-      tags: [admin]
-      responses:
-        "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/App' } } } } }
-    post:
-      summary: Create an app
-      description: "Create an app."
-      operationId: postAdminApps
-      tags: [admin]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [id, name]
-              properties:
-                id: { type: string }
-                name: { type: string }
-                description: { type: string }
-                environment: { type: string }
-      responses:
-        "201": { description: Created }
-
-  /admin/apps/{appId}:
-    delete:
-      summary: Delete an app
-      description: "Delete an app."
-      operationId: deleteAdminAppsAppid
-      tags: [admin]
-      parameters:
-        - { name: appId, in: path, required: true, schema: { type: string }, description: "Path parameter appId." }
-      responses:
-        "204": { description: No Content }
-
-  /admin/apps/{appId}/scopes:
-    post:
-      summary: Add a scope to an app
-      description: "Add a scope to an app."
-      operationId: postAdminAppsAppidScopes
-      tags: [admin]
-      parameters:
-        - { name: appId, in: path, required: true, schema: { type: string }, description: "Path parameter appId." }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [scope]
-              properties: { scope: { type: string }, description: { type: string } }
-      responses:
-        "201": { description: Created }
-
-  /admin/apps/{appId}/scopes/{scope}:
-    delete:
-      summary: Remove a scope from an app
-      description: "Remove a scope from an app."
-      operationId: deleteAdminAppsAppidScopesScope
-      tags: [admin]
-      parameters:
-        - { name: appId, in: path, required: true, schema: { type: string }, description: "Path parameter appId." }
-        - { name: scope, in: path, required: true, schema: { type: string }, description: "Path parameter scope." }
-      responses:
-        "204": { description: No Content }
-
-  /admin/users:
-    get:
-      summary: List all users
-      description: "List all users."
-      operationId: getAdminUsers
-      tags: [admin]
-      responses:
-        "200": { description: OK }
-
-  /admin/users/{userId}:
-    patch:
-      summary: Update a user's status
-      description: "Update a user's status."
-      operationId: patchAdminUsersUserid
-      tags: [admin]
-      parameters:
-        - { name: userId, in: path, required: true, schema: { type: string }, description: "Path parameter userId." }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [status]
-              properties: { status: { type: string, enum: [active, deactivated, pending_deletion, deleted] } }
-      responses:
-        "204": { description: No Content }
-
-  /admin/groups:
-    get:
-      summary: List all groups
-      description: "List all groups."
-      operationId: getAdminGroups
-      tags: [admin]
-      responses:
-        "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Group' } } } } }
-    post:
-      summary: Create a group
-      description: "Create a group."
-      operationId: postAdminGroups
-      tags: [admin]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [name]
-              properties: { name: { type: string }, description: { type: string } }
-      responses:
-        "201": { description: Created }
-
-  /admin/groups/{groupId}:
-    delete:
-      summary: Delete a group
-      description: "Delete a group."
-      operationId: deleteAdminGroupsGroupid
-      tags: [admin]
-      parameters:
-        - { name: groupId, in: path, required: true, schema: { type: string }, description: "Path parameter groupId." }
-      responses:
-        "204": { description: No Content }
-
-  /admin/groups/{groupId}/members:
-    post:
-      summary: Add a user to a group
-      description: "Add a user to a group."
-      operationId: postAdminGroupsGroupidMembers
-      tags: [admin]
-      parameters:
-        - { name: groupId, in: path, required: true, schema: { type: string }, description: "Path parameter groupId." }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { type: object, required: [userId], properties: { userId: { type: string } } }
-      responses:
-        "204": { description: No Content }
-
-  /admin/groups/{groupId}/members/{userId}:
-    delete:
-      summary: Remove a user from a group
-      description: "Remove a user from a group."
-      operationId: deleteAdminGroupsGroupidMembersUserid
-      tags: [admin]
-      parameters:
-        - { name: groupId, in: path, required: true, schema: { type: string }, description: "Path parameter groupId." }
-        - { name: userId, in: path, required: true, schema: { type: string }, description: "Path parameter userId." }
-      responses:
-        "204": { description: No Content }
-
-  /admin/policies:
-    get:
-      summary: List policies
-      description: "List policies."
-      operationId: getAdminPolicies
-      tags: [admin]
-      parameters:
-        - { name: appId, in: query, schema: { type: string }, description: "Query parameter appId." }
-      responses:
-        "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Policy' } } } } }
-    post:
-      summary: Create a policy
-      description: "Create a policy."
-      operationId: postAdminPolicies
-      tags: [admin]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [appId, subjectType, subjectId, scopes]
-              properties:
-                appId: { type: string }
-                subjectType: { type: string, enum: [user, group] }
-                subjectId: { type: string }
-                scopes: { type: array, items: { type: string } }
-      responses:
-        "201": { description: Created }
-
-  /admin/policies/{policyId}:
-    delete:
-      summary: Delete a policy
-      description: "Delete a policy."
-      operationId: deleteAdminPoliciesPolicyid
-      tags: [admin]
-      parameters:
-        - { name: policyId, in: path, required: true, schema: { type: string }, description: "Path parameter policyId." }
-      responses:
-        "204": { description: No Content }
-
-  /admin/api-keys:
-    get:
-      summary: List API keys (any user)
-      description: "List API keys (any user)."
-      operationId: getAdminApiKeys
-      tags: [admin]
-      parameters:
-        - { name: userId, in: query, schema: { type: string }, description: "Query parameter userId." }
-      responses:
-        "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/ApiKey' } } } } }
-    post:
-      summary: Create an API key for any user
-      description: "Create an API key for any user."
-      operationId: postAdminApiKeys
-      tags: [admin]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [userId, scopes]
-              properties:
-                userId: { type: string }
-                appId: { type: string, description: Legacy single-app input. }
-                appIds: { type: array, items: { type: string }, description: Apps this key can access. }
-                name: { type: string }
-                scopes: { type: array, items: { type: string } }
-                expiresAt: { type: integer }
-                resourceGrants: { type: array, description: Optional per-key resource allow-list, items: { type: object } }
-      responses:
-        "201":
-          description: Created
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ApiKeyCreated' }
-
-  /admin/api-keys/{keyId}:
-    delete:
-      summary: Revoke an API key
-      description: "Revoke an API key."
-      operationId: deleteAdminApiKeysKeyid
-      tags: [admin]
-      parameters:
-        - { name: keyId, in: path, required: true, schema: { type: string }, description: "Path parameter keyId." }
-      responses:
-        "204": { description: No Content }
-
-  /admin/usage-limits:
-    get:
-      summary: List usage limits
-      description: "List usage limits."
-      operationId: getAdminUsageLimits
-      tags: [admin]
-      parameters:
-        - { name: userId, in: query, schema: { type: string }, description: "Query parameter userId." }
-      responses:
-        "200": { description: OK }
-    post:
-      summary: Set a usage limit
-      description: "Set a usage limit."
-      operationId: postAdminUsageLimits
-      tags: [admin]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [userId, appId, limitType, limitValue]
-              properties:
-                userId: { type: string }
-                appId: { type: string }
-                limitType: { type: string }
-                limitValue: { type: integer }
-                isOverride: { type: boolean }
-      responses:
-        "201": { description: Created }
-
-  /admin/limit-increase-requests:
-    get:
-      summary: List limit increase requests
-      description: "List limit increase requests."
-      operationId: getAdminLimitIncreaseRequests
-      tags: [admin]
-      parameters:
-        - { name: status, in: query, schema: { type: string, default: pending }, description: "Query parameter status." }
-      responses:
-        "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/LimitIncreaseRequest' } } } } }
-
-  /admin/usage-limit-defaults:
-    get:
-      summary: List platform usage-limit defaults
-      description: Returns the usage limit applied when a user has no explicit override.
-      operationId: getAdminUsageLimitDefaults
-      tags: [admin]
-      responses:
-        "200": { description: Platform defaults }
-    put:
-      summary: Set a platform usage-limit default
-      description: Creates or updates the default usage limit for an app and limit type.
-      operationId: putAdminUsageLimitDefaults
-      tags: [admin]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [appId, limitType, limitValue]
-              properties:
-                appId: { type: string }
-                limitType: { type: string }
-                limitValue: { type: integer, minimum: 0 }
-      responses:
-        "204": { description: Default updated }
-
-  /admin/limit-increase-requests/{reqId}/approve:
-    post:
-      summary: Approve a limit increase request (creates the usage_limits override)
-      description: "Approve a limit increase request (creates the usage_limits override)."
-      operationId: postAdminLimitIncreaseRequestsReqidApprove
-      tags: [admin]
-      parameters:
-        - { name: reqId, in: path, required: true, schema: { type: string }, description: "Path parameter reqId." }
-      responses:
-        "204": { description: No Content }
-
-  /admin/limit-increase-requests/{reqId}/deny:
-    post:
-      summary: Deny a limit increase request
-      description: "Deny a limit increase request."
-      operationId: postAdminLimitIncreaseRequestsReqidDeny
-      tags: [admin]
-      parameters:
-        - { name: reqId, in: path, required: true, schema: { type: string }, description: "Path parameter reqId." }
-      responses:
-        "204": { description: No Content }
-
-  /admin/audit-log:
-    get:
-      summary: List audit log entries
-      description: "List audit log entries."
-      operationId: getAdminAuditLog
-      tags: [admin]
-      parameters:
-        - { name: userId, in: query, schema: { type: string }, description: "Query parameter userId." }
-        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 500 }, description: "Query parameter limit." }
-      responses:
-        "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/AuditLogEntry' } } } } }
-
   /me:
     get:
+      tags: [Self-service]
       summary: Get own user profile
-      description: "Get own user profile."
+      description: Returns the profile of the currently signed-in user.
       operationId: getMe
-      tags: [self-service]
       responses:
         "200": { description: OK }
-
   /me/api-keys:
     get:
+      tags: [Self-service]
       summary: List own API keys
-      description: "List own API keys."
+      description: Lists API keys owned by the currently signed-in user.
       operationId: getMeApiKeys
-      tags: [self-service]
       responses:
         "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/ApiKey' } } } } }
     post:
+      tags: [Self-service]
       summary: Create an API key for yourself (scopes limited to what your policy already grants)
-      description: "Create an API key for yourself (scopes limited to what your policy already grants)."
       operationId: postMeApiKeys
-      tags: [self-service]
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [scopes]
+              required: [appId, scopes]
               properties:
-                appId: { type: string, description: Legacy single-app input. }
-                appIds: { type: array, items: { type: string }, description: Apps this key can access. }
+                appId: { type: string }
                 name: { type: string }
                 scopes: { type: array, items: { type: string } }
-                expiresAt: { type: integer, description: Unix timestamp; self-service keys have a short maximum TTL. }
-                resourceGrants: { type: array, description: Optional per-key resource allow-list, items: { type: object } }
       responses:
-        "201":
-          description: Created
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ApiKeyCreated' }
-        "403":
-          description: None of the requested scopes are allowed by your policy
-          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
-
+        "201": { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/ApiKeyCreated' } } } }
+        "403": { description: None of the requested scopes are allowed by your policy, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   /me/api-keys/{keyId}:
     delete:
+      tags: [Self-service]
       summary: Revoke one of your own API keys
-      description: "Revoke one of your own API keys."
       operationId: deleteMeApiKeysKeyid
-      tags: [self-service]
       parameters:
-        - { name: keyId, in: path, required: true, schema: { type: string }, description: "Path parameter keyId." }
+        - { name: keyId, in: path, required: true, schema: { type: string } }
       responses:
         "204": { description: No Content }
-
   /me/limit-increase-requests:
     get:
+      tags: [Self-service]
       summary: List your own limit increase requests
-      description: "List your own limit increase requests."
       operationId: getMeLimitIncreaseRequests
-      tags: [self-service]
       responses:
         "200": { description: OK }
     post:
+      tags: [Self-service]
       summary: Request a usage limit increase
-      description: "Request a usage limit increase."
       operationId: postMeLimitIncreaseRequests
-      tags: [self-service]
       requestBody:
         required: true
         content:
