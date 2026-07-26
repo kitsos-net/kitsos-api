@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { authenticate, checkResourceGrant, checkKeyResourceAccess, checkRateLimit, checkUsageLimitForUser, getUsageLimit, sha256Hex, withRetryAfter } from "@kitsos/auth";
-import { withTelemetry } from "@kitsos/telemetry";
+import { recordError, recordEvent, withTelemetry } from "@kitsos/telemetry";
 import { resolvePayload } from "./dotpath";
 import { sendViaBrevo } from "./brevo";
 import { getTemplateHtml, invalidateTemplateCache, renderTemplate } from "./template";
@@ -57,10 +57,23 @@ app.post("/webhook/:webhookId", async (c) => {
       mapping: string;
       secret_hash: string;
     }>();
-  if (!webhook) return c.json({ error: "not-found" }, 404);
+  if (!webhook) {
+    recordEvent("mail.webhook.deliver", "denied", {
+      "kitsos.resource.id": webhookId,
+      "error.code": "not-found",
+    });
+    return c.json({ error: "not-found" }, 404);
+  }
 
   const providedHash = await sha256Hex(providedSecret);
-  if (providedHash !== webhook.secret_hash) return c.json({ error: "invalid-secret" }, 401);
+  if (providedHash !== webhook.secret_hash) {
+    recordEvent("mail.webhook.deliver", "denied", {
+      "kitsos.user.id": webhook.user_id,
+      "kitsos.resource.id": webhookId,
+      "error.code": "invalid-secret",
+    });
+    return c.json({ error: "invalid-secret" }, 401);
+  }
 
   const template = await c.env.DB.prepare("SELECT * FROM mail_templates WHERE id = ?")
     .bind(webhook.template_id)
@@ -89,7 +102,18 @@ app.post("/webhook/:webhookId", async (c) => {
     html,
   });
 
-  if (!result.ok) return c.json({ error: "send-failed", detail: result.error }, 502);
+  if (!result.ok) {
+    recordError("mail.webhook.deliver", "send-failed", "Email provider rejected webhook delivery", {
+      "kitsos.user.id": webhook.user_id,
+      "kitsos.resource.id": webhookId,
+    });
+    return c.json({ error: "send-failed", detail: result.error }, 502);
+  }
+  recordEvent("mail.webhook.deliver", "success", {
+    "kitsos.user.id": webhook.user_id,
+    "kitsos.resource.id": webhookId,
+    "mail.recipient_count": JSON.parse(webhook.to_addresses).length,
+  });
   return c.json({ sent: true });
 });
 
@@ -150,8 +174,18 @@ app.post("/internal/verification-email", async (c) => {
     html,
     text: `Bestätige die Verifizierung für ${body.resource}: ${confirmUrl}`,
   });
-  if (!result.ok) return c.json({ error: "send-failed", detail: result.error }, 502);
+  if (!result.ok) {
+    recordError("mail.verification.send", "send-failed", "Email provider rejected verification delivery", {
+      "kitsos.user.id": auth.context!.userId,
+      "kitsos.api_key.id": auth.context!.apiKeyId,
+    });
+    return c.json({ error: "send-failed", detail: result.error }, 502);
+  }
 
+  recordEvent("mail.verification.send", "success", {
+    "kitsos.user.id": auth.context!.userId,
+    "kitsos.api_key.id": auth.context!.apiKeyId,
+  });
   return c.json({ sent: true });
 });
 
@@ -191,7 +225,21 @@ app.post("/send", async (c) => {
   }
 
   const result = await sendViaBrevo(c.env, { from: body.from, to: body.to, subject: body.subject, html, text: body.text });
-  if (!result.ok) return c.json({ error: "send-failed", detail: result.error }, 502);
+  if (!result.ok) {
+    recordError("mail.message.send", "send-failed", "Email provider rejected message delivery", {
+      "kitsos.user.id": ctx.userId,
+      "kitsos.api_key.id": ctx.apiKeyId,
+      "mail.recipient_count": body.to.length,
+      "mail.template.id": body.template,
+    });
+    return c.json({ error: "send-failed", detail: result.error }, 502);
+  }
+  recordEvent("mail.message.send", "success", {
+    "kitsos.user.id": ctx.userId,
+    "kitsos.api_key.id": ctx.apiKeyId,
+    "mail.recipient_count": body.to.length,
+    "mail.template.id": body.template,
+  });
   return c.json({ sent: true });
 });
 
@@ -213,6 +261,11 @@ app.post("/templates", async (c) => {
   await c.env.DB.prepare("INSERT INTO mail_templates (id, user_id, name, url, variables) VALUES (?, ?, ?, ?, ?)")
     .bind(templateId, auth.context!.userId, body.name, body.url, JSON.stringify(body.variables))
     .run();
+  recordEvent("mail.template.create", "success", {
+    "kitsos.user.id": auth.context!.userId,
+    "kitsos.api_key.id": auth.context!.apiKeyId,
+    "kitsos.resource.id": templateId,
+  });
   return c.json({ id: templateId }, 201);
 });
 
@@ -235,6 +288,11 @@ app.patch("/templates/:templateId", async (c) => {
       .bind(JSON.stringify(body.variables), templateId, auth.context!.userId)
       .run();
   }
+  recordEvent("mail.template.update", "success", {
+    "kitsos.user.id": auth.context!.userId,
+    "kitsos.api_key.id": auth.context!.apiKeyId,
+    "kitsos.resource.id": templateId,
+  });
   return c.body(null, 204);
 });
 
@@ -247,6 +305,11 @@ app.delete("/templates/:templateId", async (c) => {
     .bind(c.req.param("templateId"), auth.context!.userId)
     .run();
   await invalidateTemplateCache(c.env, c.req.param("templateId"));
+  recordEvent("mail.template.delete", "success", {
+    "kitsos.user.id": auth.context!.userId,
+    "kitsos.api_key.id": auth.context!.apiKeyId,
+    "kitsos.resource.id": c.req.param("templateId"),
+  });
   return c.body(null, 204);
 });
 
@@ -298,6 +361,11 @@ app.post("/webhooks", async (c) => {
     .bind(webhookId, ctx.userId, body.name, secretHash, body.templateId, body.fromAddress, JSON.stringify(body.toAddresses), JSON.stringify(body.mapping))
     .run();
 
+  recordEvent("mail.webhook.create", "success", {
+    "kitsos.user.id": ctx.userId,
+    "kitsos.api_key.id": ctx.apiKeyId,
+    "kitsos.resource.id": webhookId,
+  });
   // secret shown only here — not recoverable afterwards
   return c.json({ id: webhookId, secret, url: `https://mail.api.kitsos.net/webhook/${webhookId}` }, 201);
 });
@@ -325,15 +393,26 @@ app.patch("/webhooks/:webhookId", async (c) => {
   await c.env.DB.prepare(`UPDATE mail_webhooks SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`)
     .bind(...values)
     .run();
+  recordEvent("mail.webhook.update", "success", {
+    "kitsos.user.id": auth.context!.userId,
+    "kitsos.api_key.id": auth.context!.apiKeyId,
+    "kitsos.resource.id": webhookId,
+  });
   return c.body(null, 204);
 });
 
 app.delete("/webhooks/:webhookId", async (c) => {
   const auth = await authenticate(c.req.raw, c.env, "mail:webhook:delete", APP_ID);
   if (!auth.allowed) return withRetryAfter(c.json({ error: auth.reason }, auth.status as 401 | 403 | 429), auth);
+  const webhookId = c.req.param("webhookId");
   await c.env.DB.prepare("DELETE FROM mail_webhooks WHERE id = ? AND user_id = ?")
-    .bind(c.req.param("webhookId"), auth.context!.userId)
+    .bind(webhookId, auth.context!.userId)
     .run();
+  recordEvent("mail.webhook.delete", "success", {
+    "kitsos.user.id": auth.context!.userId,
+    "kitsos.api_key.id": auth.context!.apiKeyId,
+    "kitsos.resource.id": webhookId,
+  });
   return c.body(null, 204);
 });
 

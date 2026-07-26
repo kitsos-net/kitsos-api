@@ -11,12 +11,52 @@ contains:
 | `attributes.custom["kitsos.auth.method"]` | `api_key` or `session` |
 | `attributes.custom["kitsos.api_key.id"]` | Internal key ID, if used |
 | `attributes.custom["kitsos.request.scope"]` | Scope checked for the request |
+| `attributes.custom["kitsos.event.name"]` | Last semantic event on the request |
+| `attributes.custom["kitsos.event.outcome"]` | `success`, `allowed`, `denied`, `error`, or `noop` |
+| `attributes.custom["error.code"]` | Stable machine-readable failure reason |
 | `attributes.http.response.status_code` | Final HTTP response status |
 | `attributes.http.request.method` | HTTP method |
 | `attributes.url.path` | Request path |
 
-No email address, raw API key, authorization header, or request body is added
-to telemetry.
+Valid API-key requests contain `kitsos.api_key.id`. Invalid keys contain only
+a 16-character SHA-256 fingerprint so repeated attempts can be correlated.
+No email address, raw API key, full API-key hash, authorization header,
+confirmation token, webhook secret, or request body is added to telemetry.
+
+## Semantic events
+
+Events are stored both in the span's `events` array and, for simple filtering,
+as the latest `kitsos.event.*` attributes. Current event names include:
+
+- `auth.decision`, `resource.authorization`, `usage.decision`
+- `hme.alias.create`, `hme.alias.update`, `hme.alias.delete`,
+  `hme.email.forward`
+- `mail.message.send`, `mail.verification.send`, `mail.webhook.deliver`,
+  and template/webhook create, update, and delete events
+- `verify.resource.create`, `verify.resource.delete`,
+  `verify.domain.check`, `verify.domain.recheck`, `verify.email.confirm`
+- `keys.api_key.create`, `keys.api_key.revoke`,
+  `keys.limit_request.create`, `keys.limit_request.approve`,
+  `keys.limit_request.deny`
+
+Event fields use internal user, key, resource, and verification IDs. Failure
+events have a stable `error.code` and a sanitized `error.message` where useful.
+
+### Failures by event, user, and key
+
+```apl
+['YOUR_AXIOM_DATASET']
+| where ['kind'] == "server"
+| extend
+    event_name = tostring(['attributes.custom']['kitsos.event.name']),
+    outcome = tostring(['attributes.custom']['kitsos.event.outcome']),
+    error_code = tostring(['attributes.custom']['error.code']),
+    user_id = tostring(['attributes.custom']['kitsos.user.id']),
+    api_key_id = tostring(['attributes.custom']['kitsos.api_key.id'])
+| where outcome == "denied" or outcome == "error"
+| summarize failures = count() by event_name, error_code, user_id, api_key_id
+| sort by failures desc
+```
 
 Replace `YOUR_AXIOM_DATASET` in the queries below with the value of
 `AXIOM_DATASET`.
