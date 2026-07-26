@@ -18,6 +18,11 @@ Raw API keys (`kitsos_...`) are only ever returned once, at creation
 time (`POST /admin/api-keys` or `POST /me/api-keys`). Only the SHA-256
 hash is stored.
 
+- `/analytics/*` — machine-to-machine endpoints for Grafana. They accept
+  **only** a `kitsos_` API key for the `analytics` app with the
+  `analytics:read` scope; Clerk JWTs are rejected. The endpoints expose
+  fixed, aggregated queries and never accept raw SQL.
+
 ## Setup
 
 ```bash
@@ -62,10 +67,18 @@ Then set `ADMIN_GROUP_ID=admins` as a secret.
 | GET | `/admin/limit-increase-requests?status=pending` | |
 | POST | `/admin/limit-increase-requests/:id/approve` \| `/deny` | |
 | GET | `/admin/audit-log?userId=&limit=` | |
+| GET | `/analytics/overview` | API key: `analytics:read` |
+| GET | `/analytics/top-users?metric=&limit=` | API key: `analytics:read` |
+| GET | `/analytics/top-apps?limit=` | API key: `analytics:read` |
+| GET | `/analytics/api-calls?from=&to=&groupBy=app\|user` | API key: `analytics:read` |
 | GET | `/me` | own user row |
 | GET/POST | `/me/api-keys` | self-service, scope-limited |
 | DELETE | `/me/api-keys/:keyId` | own keys only |
 | GET/POST | `/me/limit-increase-requests` | |
+
+Apply `packages/auth/0005_analytics.sql`, then create a policy and an API
+key for the Grafana service account under the `analytics` app. Configure
+Grafana's JSON/Infinity data source with `Authorization: Bearer kitsos_...`.
 
 ## Not yet done
 
