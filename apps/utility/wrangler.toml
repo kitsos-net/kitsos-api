@@ -1,13 +1,10 @@
-name = "verify"
+name = "utility"
 main = "src/index.ts"
 compatibility_date = "2026-07-01"
 compatibility_flags = ["nodejs_compat"]
 routes = [
-  { pattern = "verify.api.kitsos.net", custom_domain = true }
+  { pattern = "utility.api.kitsos.net", custom_domain = true }
 ]
-
-[triggers]
-crons = ["17 3 * * *"]
 
 [[d1_databases]]
 binding = "DB"
@@ -22,10 +19,6 @@ id = "86fb5bad46c6458d91cbb322b7178ccf"
 binding = "USAGE_COUNTERS"
 id = "4823ab0d3fd6452e8437631a3717f2b5"
 
-# Secrets — set via `wrangler secret put <name>`:
-#   CLERK_SECRET_KEY
-#   CLERK_PUBLISHABLE_KEY
-#   ADMIN_GROUP_ID
-#   MAIL_API_KEY       (kitsos_... key for mail.api.kitsos.net, scope mail:send)
+# Optional Axiom tracing secrets, matching the other API workers:
 #   AXIOM_TOKEN
 #   AXIOM_DATASET

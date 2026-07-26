@@ -9,7 +9,8 @@ worker — imported directly into each app (`dns-manager`, `hide-my-email`,
 1. **Credential validation** — either a Clerk session JWT (browser
    clients, e.g. Admin UI) or a `kitsos_...` API key (machine
    clients), via `authenticate()`.
-2. **Scope check** — effective scopes are the intersection of what the
+2. **Cross-app keys and scope check** — a key can be assigned to one or more
+   apps. For each requested app its effective scopes are the intersection of what the
    API key was issued with and what the user's/group's policy allows
    for that app. A key can only narrow permissions, never widen them.
 3. **Resource grants (ReBAC)** — `checkResourceGrant()` for
@@ -18,13 +19,18 @@ worker — imported directly into each app (`dns-manager`, `hide-my-email`,
    expired-and-not-renewed verification revokes access after its
    grace period.
 4. **Rate limiting** — fixed-window counter in KV
-   (`kitsos-api-usage-counters`), cheap enough for Free Tier.
-5. **Usage limits** — daily/period budgets per user+app+limit_type,
-   configurable per user via `usage_limits.is_override`, with
-   `limit_increase_requests` as the admin-approved increase flow (not
-   yet wired into an endpoint — that's part of the Admin UI work).
-6. **Audit log** — every allow/deny decision is written to
+   (`kitsos-api-usage-counters`). App-wide or scope-specific rules from
+   `rate_limit_rules` override each endpoint's safe default.
+5. **Usage limits** — daily budgets per user+app+limit_type. Defaults live
+   in `usage_limit_defaults`; a user row in `usage_limits` takes precedence.
+   Increase requests are reviewable and approvable in the Keys API.
+6. **Optional key resource allow-lists** — `api_key_resource_grants` can
+   narrow a key to individual resources (currently used for mail templates).
+7. **Audit log** — every allow/deny decision is written to
    `audit_log`, fire-and-forget so it never blocks the request.
+8. **Per-user observability** — authenticated request spans include internal
+   user, API-key, auth-method and scope identifiers for exact success/error
+   aggregation in Axiom. See `docs/axiom-api-usage.md`.
 
 ## Typical app worker
 
@@ -61,9 +67,18 @@ concurrently active keys before you need Workers Paid ($5/mo, which
 also lifts the KV write cap). This was a deliberate tradeoff made
 during the original design discussion — see [[kitsos-api-platform]].
 
+## Scope conventions currently enforced
+
+- Mail: `mail:send`, `mail:template:read|write|delete`,
+  `mail:webhook:read|write|delete`
+- Hide My Email: `hme:read|create|edit|delete`
+- Verify: `verify:resource:read|create|verify|delete`
+
+The legacy `*:manage` scopes remain accepted only for existing keys; issue the
+granular scopes for new keys.
+
 ## Not yet implemented here
 
-- Admin UI for approving `limit_increase_requests`
 - Cron worker for resource re-verification reminders / grace-period
   cutoffs (30d DNS zones, 90d email addresses)
 - `verify.api.kitsos.net` (the actual DNS-TXT poll / magic-link

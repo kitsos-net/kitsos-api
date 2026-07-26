@@ -6,7 +6,7 @@
 export async function lookupTxtRecords(hostname: string): Promise<string[]> {
   const url = `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=TXT`;
   const res = await fetch(url, { headers: { accept: "application/dns-json" } });
-  if (!res.ok) return [];
+  if (!res.ok) throw new Error(`dns-query-failed:${res.status}`);
 
   const data = await res.json<{ Answer?: { data: string; type: number }[] }>();
   if (!data.Answer) return [];

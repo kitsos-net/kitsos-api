@@ -2,12 +2,14 @@ import type { Context, Next } from "hono";
 import { verifyClerkSession, ensureUserRow } from "@kitsos/auth";
 import type { Env } from "./env";
 
+type KeysContext = Context<{ Bindings: Env; Variables: { userId: string } }>;
+
 /**
  * Gates a route to Clerk-authenticated users who are members of the
  * admin group (env.ADMIN_GROUP_ID). Sets c.set("userId", ...) for
  * downstream handlers on success.
  */
-export async function requireAdmin(c: Context<{ Bindings: Env }>, next: Next) {
+export async function requireAdmin(c: KeysContext, next: Next) {
   const authHeader = c.req.header("Authorization") ?? "";
   const token = authHeader.replace(/^Bearer\s+/i, "");
   if (!token) return c.json({ error: "missing-credentials" }, 401);
@@ -30,7 +32,7 @@ export async function requireAdmin(c: Context<{ Bindings: Env }>, next: Next) {
 }
 
 /** Only requires a valid Clerk session — for self-service routes. */
-export async function requireUser(c: Context<{ Bindings: Env }>, next: Next) {
+export async function requireUser(c: KeysContext, next: Next) {
   const authHeader = c.req.header("Authorization") ?? "";
   const token = authHeader.replace(/^Bearer\s+/i, "");
   if (!token) return c.json({ error: "missing-credentials" }, 401);

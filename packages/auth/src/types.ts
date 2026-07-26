@@ -21,6 +21,7 @@ export interface CheckResult {
   allowed: boolean;
   status: number;           // 401 | 403 | 429 | 200
   reason?: string;          // machine-readable, mirrors X-Forbidden-Reason
+  retryAfterSeconds?: number;
 }
 
 export interface ResourceCheckOptions {
@@ -37,4 +38,10 @@ export interface RateLimitOptions {
 export interface UsageLimitOptions {
   limitType: string;        // e.g. "emails_per_day"
   cost?: number;             // default 1
+}
+
+export interface ApiKeyResourceGrant {
+  resourceType: string;
+  resourceId: string;
+  scopes?: string[];
 }
