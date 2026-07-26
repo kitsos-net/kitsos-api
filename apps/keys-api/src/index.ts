@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { sha256Hex } from "@kitsos/auth";
 import type { ApiKeyResourceGrant } from "@kitsos/auth";
-import { withTelemetry } from "@kitsos/telemetry";
+import { recordEvent, withTelemetry } from "@kitsos/telemetry";
 import { requireAdmin, requireUser } from "./middleware";
 import type { Env } from "./env";
 
@@ -197,14 +197,26 @@ admin.post("/api-keys", async (c) => {
     ).bind(keyId, grant.resourceType, grant.resourceId, JSON.stringify(grant.scopes ?? []))),
   ]);
 
+  recordEvent("keys.api_key.create", "success", {
+    "kitsos.user.id": body.userId,
+    "kitsos.api_key.id": keyId,
+    "actor.user.id": c.get("userId"),
+    "api_key.app_count": appIds.length,
+    "api_key.scope_count": body.scopes.length,
+  });
   // rawKey is only ever shown here — not recoverable afterwards
   return c.json({ id: keyId, key: rawKey, appIds, resourceGrants: body.resourceGrants ?? [] }, 201);
 });
 
 admin.delete("/api-keys/:keyId", async (c) => {
+  const keyId = c.req.param("keyId");
   await c.env.DB.prepare("UPDATE api_keys SET status = 'revoked' WHERE id = ?")
-    .bind(c.req.param("keyId"))
+    .bind(keyId)
     .run();
+  recordEvent("keys.api_key.revoke", "success", {
+    "kitsos.api_key.id": keyId,
+    "actor.user.id": c.get("userId"),
+  });
   return c.body(null, 204);
 });
 
@@ -276,16 +288,29 @@ admin.post("/limit-increase-requests/:reqId/approve", async (c) => {
     ).bind(id(), req.user_id, req.app_id, req.limit_type, req.requested_value),
   ]);
 
+  recordEvent("keys.limit_request.approve", "success", {
+    "actor.user.id": adminId,
+    "kitsos.user.id": req.user_id,
+    "kitsos.resource.id": reqId,
+    "kitsos.app.id": req.app_id,
+    "limit.type": req.limit_type,
+    "limit.value": req.requested_value,
+  });
   return c.body(null, 204);
 });
 
 admin.post("/limit-increase-requests/:reqId/deny", async (c) => {
   const adminId = c.get("userId");
+  const reqId = c.req.param("reqId");
   await c.env.DB.prepare(
     "UPDATE limit_increase_requests SET status = 'denied', reviewed_by = ?, reviewed_at = unixepoch() WHERE id = ?"
   )
-    .bind(adminId, c.req.param("reqId"))
+    .bind(adminId, reqId)
     .run();
+  recordEvent("keys.limit_request.deny", "success", {
+    "actor.user.id": adminId,
+    "kitsos.resource.id": reqId,
+  });
   return c.body(null, 204);
 });
 
@@ -394,13 +419,24 @@ me.post("/api-keys", async (c) => {
     ).bind(keyId, grant.resourceType, grant.resourceId, JSON.stringify(grant.scopes ?? []))),
   ]);
 
+  recordEvent("keys.api_key.create", "success", {
+    "kitsos.user.id": userId,
+    "kitsos.api_key.id": keyId,
+    "api_key.app_count": appIds.length,
+    "api_key.scope_count": requestedScopes.length,
+  });
   return c.json({ id: keyId, key: rawKey, appIds, scopes: requestedScopes, resourceGrants: body.resourceGrants ?? [], expiresAt: body.expiresAt ?? null }, 201);
 });
 
 me.delete("/api-keys/:keyId", async (c) => {
+  const keyId = c.req.param("keyId");
   await c.env.DB.prepare("UPDATE api_keys SET status = 'revoked' WHERE id = ? AND user_id = ?")
-    .bind(c.req.param("keyId"), c.get("userId"))
+    .bind(keyId, c.get("userId"))
     .run();
+  recordEvent("keys.api_key.revoke", "success", {
+    "kitsos.user.id": c.get("userId"),
+    "kitsos.api_key.id": keyId,
+  });
   return c.body(null, 204);
 });
 
@@ -421,6 +457,13 @@ me.post("/limit-increase-requests", async (c) => {
   )
     .bind(reqId, userId, body.appId, body.limitType, body.requestedValue, body.reason ?? null)
     .run();
+  recordEvent("keys.limit_request.create", "success", {
+    "kitsos.user.id": userId,
+    "kitsos.resource.id": reqId,
+    "kitsos.app.id": body.appId,
+    "limit.type": body.limitType,
+    "limit.value": body.requestedValue,
+  });
   return c.json({ id: reqId }, 201);
 });
 

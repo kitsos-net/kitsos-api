@@ -5,6 +5,7 @@ import type {
   RateLimitOptions,
   UsageLimitOptions,
 } from "./types";
+import { recordResourceDecision, recordUsageDecision } from "./telemetry";
 
 const AUTH_CACHE_TTL_SECONDS = 60;
 
@@ -131,17 +132,21 @@ export async function checkResourceGrant(
   // API-key scopes decide which operation is allowed. Resource verification
   // only proves ownership and is therefore valid platform-wide.
   const verification = await env.DB.prepare(
-    `SELECT 1
+    `SELECT r.id
      FROM resources r
      JOIN resource_verifications rv ON rv.resource_id = r.id AND rv.user_id = ?
      WHERE r.resource_type = ? AND r.value = ?
        AND rv.verified_at IS NOT NULL`
   )
     .bind(context.userId, resourceType, normalizedValue)
-    .first();
+    .first<{ id: string }>();
 
-  if (!verification) return { allowed: false, status: 403, reason: "resource-not-verified" };
+  if (!verification) {
+    recordResourceDecision(context, resourceType, undefined, "denied", "resource-not-verified");
+    return { allowed: false, status: 403, reason: "resource-not-verified" };
+  }
 
+  recordResourceDecision(context, resourceType, verification.id, "allowed");
   return { allowed: true, status: 200 };
 }
 
@@ -251,6 +256,7 @@ export async function checkUsageLimitForUser(
 
   if (count + cost > limitValue) {
     const now = Math.floor(Date.now() / 1000);
+    recordUsageDecision(userId, appId, options.limitType, "denied", count, cost, limitValue, "usage-limit-exceeded");
     return {
       allowed: false,
       status: 429,
@@ -263,6 +269,7 @@ export async function checkUsageLimitForUser(
     expirationTtl: 172800, // 48h
   });
 
+  recordUsageDecision(userId, appId, options.limitType, "allowed", count, cost, limitValue);
   return { allowed: true, status: 200 };
 }
 

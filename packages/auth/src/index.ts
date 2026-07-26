@@ -1,6 +1,6 @@
 import type { Env, AuthContext, CheckResult, RateLimitOptions } from "./types";
 import { verifyClerkSession, ensureUserRow } from "./clerk";
-import { annotateAuthenticatedRequest } from "./telemetry";
+import { annotateAuthenticatedRequest, recordAuthDecision } from "./telemetry";
 import {
   validateApiKey,
   checkScope,
@@ -56,13 +56,32 @@ export async function authenticateApiKey(
   const authHeader = request.headers.get("Authorization") ?? "";
   const token = authHeader.replace(/^Bearer\s+/i, "");
 
-  if (!token) return { allowed: false, status: 401, reason: "missing-credentials" };
+  if (!token) {
+    recordAuthDecision({ appId, requiredScope, outcome: "denied", reason: "missing-credentials" });
+    return { allowed: false, status: 401, reason: "missing-credentials" };
+  }
   if (!token.startsWith("kitsos_")) {
+    recordAuthDecision({
+      appId,
+      requiredScope,
+      outcome: "denied",
+      reason: "api-key-required",
+      keyFingerprint: (await sha256Hex(token)).slice(0, 16),
+    });
     return { allowed: false, status: 401, reason: "api-key-required" };
   }
 
   const context = await validateApiKey(token, appId, env);
-  if (!context) return { allowed: false, status: 401, reason: "invalid-credentials" };
+  if (!context) {
+    recordAuthDecision({
+      appId,
+      requiredScope,
+      outcome: "denied",
+      reason: "invalid-credentials",
+      keyFingerprint: (await sha256Hex(token)).slice(0, 16),
+    });
+    return { allowed: false, status: 401, reason: "invalid-credentials" };
+  }
   annotateAuthenticatedRequest(context, appId, requiredScope);
 
   const scopeCheck = checkScope(context, requiredScope);
@@ -75,6 +94,7 @@ export async function authenticateApiKey(
       result: "denied",
       reason: scopeCheck.reason,
     });
+    recordAuthDecision({ appId, requiredScope, outcome: "denied", reason: scopeCheck.reason, context });
     return scopeCheck;
   }
 
@@ -88,6 +108,7 @@ export async function authenticateApiKey(
       result: "denied",
       reason: rlCheck.reason,
     });
+    recordAuthDecision({ appId, requiredScope, outcome: "denied", reason: rlCheck.reason, context });
     return rlCheck;
   }
 
@@ -98,6 +119,7 @@ export async function authenticateApiKey(
     action: requiredScope,
     result: "allowed",
   });
+  recordAuthDecision({ appId, requiredScope, outcome: "allowed", context });
 
   return { allowed: true, status: 200, context };
 }
@@ -126,6 +148,7 @@ export async function authenticate(
   const token = authHeader.replace(/^Bearer\s+/i, "");
 
   if (!token) {
+    recordAuthDecision({ appId, requiredScope, outcome: "denied", reason: "missing-credentials" });
     return { allowed: false, status: 401, reason: "missing-credentials" };
   }
 
@@ -148,6 +171,7 @@ export async function authenticate(
   }
 
   if (!context) {
+    recordAuthDecision({ appId, requiredScope, outcome: "denied", reason: "invalid-credentials" });
     return { allowed: false, status: 401, reason: "invalid-credentials" };
   }
   annotateAuthenticatedRequest(context, appId, requiredScope);
@@ -162,6 +186,7 @@ export async function authenticate(
       result: "denied",
       reason: scopeCheck.reason,
     });
+    recordAuthDecision({ appId, requiredScope, outcome: "denied", reason: scopeCheck.reason, context });
     return scopeCheck;
   }
 
@@ -179,6 +204,7 @@ export async function authenticate(
       result: "denied",
       reason: rlCheck.reason,
     });
+    recordAuthDecision({ appId, requiredScope, outcome: "denied", reason: rlCheck.reason, context });
     return rlCheck;
   }
 
@@ -189,6 +215,7 @@ export async function authenticate(
     action: requiredScope,
     result: "allowed",
   });
+  recordAuthDecision({ appId, requiredScope, outcome: "allowed", context });
 
   return { allowed: true, status: 200, context };
 }

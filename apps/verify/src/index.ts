@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { withTelemetry } from "@kitsos/telemetry";
+import { recordError, recordEvent, withTelemetry } from "@kitsos/telemetry";
 import { requireUser, requireAdmin } from "./middleware";
 import { lookupTxtRecords, verificationRecordName, generateVerificationToken } from "./dns";
 import { sendMagicLinkEmail } from "./mail";
@@ -164,7 +164,13 @@ resources.post("/", async (c) => {
     value?: string;
   }>().catch(() => null);
 
-  if (!body) return c.json({ error: "invalid-json-body" }, 400);
+  if (!body) {
+    recordEvent("verify.resource.create", "denied", {
+      "kitsos.user.id": userId,
+      "error.code": "invalid-json-body",
+    });
+    return c.json({ error: "invalid-json-body" }, 400);
+  }
 
   const missing = ["resourceType", "value"].filter(
     (k) => !body[k as keyof typeof body]
@@ -188,6 +194,12 @@ resources.post("/", async (c) => {
     resourceId = await findOrCreateResource(c.env, userId, resourceType, value);
     if (await hasActiveVerification(c.env, resourceId, userId)) {
       await grantAccess(c.env, resourceId, userId);
+      recordEvent("verify.resource.create", "noop", {
+        "kitsos.user.id": userId,
+        "kitsos.resource.id": resourceId,
+        "kitsos.resource.type": resourceType,
+        "verify.reason": "already-verified",
+      });
       return c.json({ resourceId, alreadyVerified: true }, 200);
     }
 
@@ -204,6 +216,14 @@ resources.post("/", async (c) => {
     if (method === "magic_link") {
       const limit = await checkAndIncrementVerifyEmailLimit(c.env, userId);
       if (!limit.allowed) {
+        recordEvent("verify.resource.create", "denied", {
+          "kitsos.user.id": userId,
+          "kitsos.resource.id": resourceId,
+          "kitsos.resource.type": resourceType,
+          "limit.type": "verification_emails_per_day",
+          "limit.value": limit.maxPerDay,
+          "error.code": "verify-email-daily-limit-exceeded",
+        });
         return c.json({ error: "verify-email-daily-limit-exceeded", maxPerDay: limit.maxPerDay }, 429);
       }
     }
@@ -225,10 +245,21 @@ resources.post("/", async (c) => {
       .bind(verificationId, resourceId, userId, method, token, "[]")
       .run();
   } catch (e) {
+    recordError("verify.resource.create", "database-error", "Could not create verification record", {
+      "kitsos.user.id": userId,
+      "kitsos.resource.type": resourceType,
+    });
     return c.json({ error: "database-error", detail: String(e) }, 500);
   }
 
   if (method === "dns_txt") {
+    recordEvent("verify.resource.create", "success", {
+      "kitsos.user.id": userId,
+      "kitsos.resource.id": resourceId,
+      "kitsos.verification.id": verificationId,
+      "kitsos.resource.type": resourceType,
+      "verify.method": method,
+    });
     return c.json({
       resourceId,
       verificationId,
@@ -242,6 +273,23 @@ resources.post("/", async (c) => {
 
   const confirmUrl = `https://verify.api.kitsos.net/resources/${resourceId}/confirm?token=${token}`;
   const result = await sendMagicLinkEmail(c.env, value, confirmUrl, value);
+  if (result.ok) {
+    recordEvent("verify.resource.create", "success", {
+      "kitsos.user.id": userId,
+      "kitsos.resource.id": resourceId,
+      "kitsos.verification.id": verificationId,
+      "kitsos.resource.type": resourceType,
+      "verify.method": method,
+    });
+  } else {
+    recordError("verify.resource.create", "verification-email-send-failed", "Could not send verification email", {
+      "kitsos.user.id": userId,
+      "kitsos.resource.id": resourceId,
+      "kitsos.verification.id": verificationId,
+      "kitsos.resource.type": resourceType,
+      "verify.method": method,
+    });
+  }
 
   return c.json({
     resourceId, verificationId,
@@ -276,6 +324,10 @@ resources.delete("/:resourceId", async (c) => {
   if (!remaining) {
     await c.env.DB.prepare("DELETE FROM resources WHERE id = ?").bind(resourceId).run();
   }
+  recordEvent("verify.resource.delete", "success", {
+    "kitsos.user.id": userId,
+    "kitsos.resource.id": resourceId,
+  });
   return c.body(null, 204);
 });
 
@@ -294,14 +346,33 @@ resources.post("/:resourceId/check-dns", async (c) => {
     .bind(resourceId, userId)
     .first<{ id: string; token: string; value: string }>();
 
-  if (!verification) return c.json({ error: "no-pending-verification" }, 404);
+  if (!verification) {
+    recordEvent("verify.domain.check", "denied", {
+      "kitsos.user.id": userId,
+      "kitsos.resource.id": resourceId,
+      "error.code": "no-pending-verification",
+    });
+    return c.json({ error: "no-pending-verification" }, 404);
+  }
 
   const records = await lookupTxtRecords(verificationRecordName(verification.value));
   if (!records.includes(verification.token)) {
+    recordEvent("verify.domain.check", "denied", {
+      "kitsos.user.id": userId,
+      "kitsos.resource.id": resourceId,
+      "kitsos.verification.id": verification.id,
+      "error.code": "verification-token-not-found",
+      "dns.txt_record_count": records.length,
+    });
     return c.json({ verified: false, expected: verification.token, found: records }, 200);
   }
 
   if (!await canVerifyResource(c.env, userId, resourceId)) {
+    recordEvent("verify.domain.check", "denied", {
+      "kitsos.user.id": userId,
+      "kitsos.resource.id": resourceId,
+      "error.code": "usage-limit-exceeded",
+    });
     return c.json({ error: "usage-limit-exceeded" }, 429);
   }
 
@@ -315,6 +386,11 @@ resources.post("/:resourceId/check-dns", async (c) => {
 
   await grantAccess(c.env, resourceId, userId);
 
+  recordEvent("verify.domain.check", "success", {
+    "kitsos.user.id": userId,
+    "kitsos.resource.id": resourceId,
+    "kitsos.verification.id": verification.id,
+  });
   return c.json({ verified: true });
 });
 
@@ -331,9 +407,21 @@ resources.get("/:resourceId/confirm", async (c) => {
     .bind(resourceId, token)
     .first<{ id: string; user_id: string }>();
 
-  if (!verification) return c.json({ error: "invalid-or-expired-token" }, 404);
+  if (!verification) {
+    recordEvent("verify.email.confirm", "denied", {
+      "kitsos.resource.id": resourceId,
+      "error.code": "invalid-or-expired-token",
+    });
+    return c.json({ error: "invalid-or-expired-token" }, 404);
+  }
 
   if (!await canVerifyResource(c.env, verification.user_id, resourceId)) {
+    recordEvent("verify.email.confirm", "denied", {
+      "kitsos.user.id": verification.user_id,
+      "kitsos.resource.id": resourceId,
+      "kitsos.verification.id": verification.id,
+      "error.code": "usage-limit-exceeded",
+    });
     return c.json({ error: "usage-limit-exceeded" }, 429);
   }
 
@@ -347,6 +435,11 @@ resources.get("/:resourceId/confirm", async (c) => {
 
   await grantAccess(c.env, resourceId, verification.user_id);
 
+  recordEvent("verify.email.confirm", "success", {
+    "kitsos.user.id": verification.user_id,
+    "kitsos.resource.id": resourceId,
+    "kitsos.verification.id": verification.id,
+  });
   return c.json({ verified: true });
 });
 
@@ -385,6 +478,8 @@ app.get("/health", (c) => c.json({ ok: true }));
 
 type VerifiedZone = {
   id: string;
+  resource_id: string;
+  user_id: string;
   token: string;
   value: string;
 };
@@ -393,7 +488,7 @@ async function recheckVerifiedZones(env: Env) {
   let afterId = "";
   for (;;) {
     const page = await env.DB.prepare(
-      `SELECT rv.id, rv.token, r.value
+      `SELECT rv.id, rv.resource_id, rv.user_id, rv.token, r.value
        FROM resource_verifications rv
        JOIN resources r ON r.id = rv.resource_id
        WHERE r.resource_type = 'zone'
@@ -414,16 +509,33 @@ async function recheckVerifiedZones(env: Env) {
             await env.DB.prepare(
               "UPDATE resource_verifications SET reverify_due_at = ? WHERE id = ?"
             ).bind(tomorrow(), verification.id).run();
+            recordEvent("verify.domain.recheck", "success", {
+              "kitsos.user.id": verification.user_id,
+              "kitsos.resource.id": verification.resource_id,
+              "kitsos.verification.id": verification.id,
+            });
           } else {
             await env.DB.prepare(
               `UPDATE resource_verifications
                SET verified_at = NULL, reverify_due_at = NULL, grace_expires_at = NULL
                WHERE id = ?`
             ).bind(verification.id).run();
+            recordEvent("verify.domain.recheck", "denied", {
+              "kitsos.user.id": verification.user_id,
+              "kitsos.resource.id": verification.resource_id,
+              "kitsos.verification.id": verification.id,
+              "error.code": "verification-token-not-found",
+              "dns.txt_record_count": records.length,
+            });
           }
         } catch {
           // A resolver/network failure is not proof that ownership was lost.
           // Leave the last verified state intact and try again on the next run.
+          recordError("verify.domain.recheck", "dns-query-failed", "DNS ownership recheck could not query the resolver", {
+            "kitsos.user.id": verification.user_id,
+            "kitsos.resource.id": verification.resource_id,
+            "kitsos.verification.id": verification.id,
+          });
         }
       }));
     }
@@ -433,13 +545,9 @@ async function recheckVerifiedZones(env: Env) {
   }
 }
 
-const telemetryHandler = withTelemetry(app, "verify");
-
-export default {
-  fetch(request, env, ctx) {
-    return telemetryHandler.fetch!(request, env, ctx);
-  },
+export default withTelemetry({
+  fetch: app.fetch,
   scheduled(_event, env, ctx) {
     ctx.waitUntil(recheckVerifiedZones(env));
   },
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<Env>, "verify");
