@@ -83,7 +83,10 @@ export async function validateApiKey(
   const context: AuthContext = {
     method: "api_key",
     userId: row.user_id,
-    appId: row.app_id,
+    // A multi-app key retains its original app_id for backwards-compatible
+    // storage, but authorization and resource grants must use the API that
+    // is currently being accessed.
+    appId,
     apiKeyId: row.id,
     scopes: effectiveScopes,
     groupIds,
