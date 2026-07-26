@@ -11,11 +11,11 @@ emails, see [[kitsos-mail-api]]).
   (hashed, compared against `mail_webhooks.secret_hash`). No
   `@kitsos/auth` involved — the webhook secret *is* the credential.
 - Everything else — `kitsos_...` API key via `@kitsos/auth`, scopes
-  `mail:send` (for `/send` and webhook creation, since that also
-  needs a resource grant) and `mail:manage` (templates/webhooks CRUD).
-- **`from` address is checked against `resource_grants`** — a key can
-  only send as (or create a webhook sending as) an address it has been
-  granted via `verify.api.kitsos.net` (`resourceType: "email_address"`).
+  `mail:send` (for `/send` and webhook creation) and `mail:manage`
+  (templates/webhooks CRUD).
+- **`from` address must be verified** — its owner verifies the email
+  address once through `verify.api.kitsos.net`; that ownership proof is
+  reusable by Mail, HME, and every other Kitsos API.
 
 ## Templates
 
@@ -65,7 +65,7 @@ wrangler deploy
 You'll also need, via `keys-api`:
 1. An `apps` row for `mail` with scopes `mail:send`, `mail:manage`
 2. A policy granting yourself those scopes
-3. A resource grant on whatever `from` addresses you want to send as
+3. A verified ownership record for every `from` address
    (via `verify.api.kitsos.net`, `resourceType: "email_address"`)
 
 ## Known gaps

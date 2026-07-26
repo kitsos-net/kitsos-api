@@ -11,10 +11,9 @@ Auth: `kitsos_...` API key with `hme:manage` scope (via `@kitsos/auth`).
 
 - `GET /aliases` — list your own aliases
 - `POST /aliases` `{forwardTo, label?}` → generates a random alias,
-  returns `{id, email, forwardTo}`. `forwardTo` must be a
-  `resource_grants` entry (`resourceType: "email_address"`, scope
-  `hme:receive`) — same verify-first pattern as `mail`'s `from`
-  address.
+  returns `{id, email, forwardTo}`. `forwardTo` must be an email address
+  whose ownership the user verified once through `verify.api.kitsos.net`.
+  The same verification works for every Kitsos API.
 - `PATCH /aliases/:id` `{status?, label?, forwardTo?}` — disable/
   re-enable, rename, or change the forwarding target
 - `DELETE /aliases/:id`

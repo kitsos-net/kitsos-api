@@ -16,18 +16,25 @@ app.use("*", cors({
   allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
 }));
 
-const DNS_REVERIFY_DAYS = 30;
-const DNS_GRACE_DAYS = 7;
-const MAGIC_LINK_REVERIFY_DAYS = 90;
-const MAGIC_LINK_GRACE_DAYS = 14;
 const MAX_VERIFY_EMAILS_PER_DAY = 15;
 const CANONICAL_RESOURCE_APP_ID = "verify";
+const RESOURCE_METHODS = { zone: "dns_txt", email_address: "magic_link" } as const;
+type ResourceType = keyof typeof RESOURCE_METHODS;
 
 function id() {
   return crypto.randomUUID();
 }
-function daysFromNow(days: number): number {
-  return Math.floor(Date.now() / 1000) + days * 86400;
+function tomorrow(): number {
+  return Math.floor(Date.now() / 1000) + 86400;
+}
+
+function normalizeResource(resourceType: ResourceType, rawValue: string) {
+  const value = rawValue.trim().toLowerCase();
+  if (resourceType === "email_address") {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) ? value : null;
+  }
+  const zone = value.replace(/\.$/, "");
+  return zone.length <= 253 && zone.includes(".") && zone.split(".").every((label) => /^(?!-)[a-z0-9-]{1,63}(?<!-)$/.test(label)) ? zone : null;
 }
 
 async function findOrCreateResource(env: Env, userId: string, resourceType: string, value: string) {
@@ -58,33 +65,26 @@ async function findOrCreateResource(env: Env, userId: string, resourceType: stri
 async function grantAccess(
   env: Env,
   resourceId: string,
-  userId: string,
-  scopes: string[]
+  userId: string
 ) {
   const existing = await env.DB.prepare(
-    "SELECT id, scopes FROM resource_grants WHERE resource_id = ? AND user_id = ? ORDER BY created_at ASC"
-  ).bind(resourceId, userId).all<{ id: string; scopes: string }>();
-  const mergedScopes = [...new Set([...existing.results.flatMap((grant) => JSON.parse(grant.scopes) as string[]), ...scopes])];
-  if (existing.results.length > 0) {
-    await env.DB.prepare("UPDATE resource_grants SET scopes = ? WHERE id = ?")
-      .bind(JSON.stringify(mergedScopes), existing.results[0].id).run();
-    return mergedScopes;
-  }
+    "SELECT id FROM resource_grants WHERE resource_id = ? AND user_id = ? LIMIT 1"
+  ).bind(resourceId, userId).first();
+  if (existing) return;
   await env.DB.prepare(
     "INSERT OR IGNORE INTO resource_grants (id, resource_id, user_id, scopes) VALUES (?, ?, ?, ?)"
   )
-    .bind(id(), resourceId, userId, JSON.stringify(mergedScopes))
+    .bind(id(), resourceId, userId, "[]")
     .run();
-  return mergedScopes;
 }
 
 async function hasActiveVerification(env: Env, resourceId: string, userId: string) {
   const verification = await env.DB.prepare(
-    `SELECT grace_expires_at FROM resource_verifications
+    `SELECT 1 FROM resource_verifications
      WHERE resource_id = ? AND user_id = ? AND verified_at IS NOT NULL
      ORDER BY verified_at DESC LIMIT 1`
-  ).bind(resourceId, userId).first<{ grace_expires_at: number | null }>();
-  return Boolean(verification && (!verification.grace_expires_at || verification.grace_expires_at >= Math.floor(Date.now() / 1000)));
+  ).bind(resourceId, userId).first();
+  return Boolean(verification);
 }
 
 /** Fixed UTC-day budget for verification email delivery. A per-user
@@ -136,56 +136,59 @@ resources.use("*", async (c, next) => {
 resources.get("/", async (c) => {
   const userId = c.get("userId");
   const r = await c.env.DB.prepare(
-    `SELECT r.id, r.app_id, r.resource_type, r.value,
-            rv.method, rv.verified_at, rv.reverify_due_at, rv.grace_expires_at
-     FROM resources r
-     JOIN resource_verifications rv ON rv.resource_id = r.id
-     WHERE rv.user_id = ?
-     ORDER BY rv.created_at DESC`
+    `WITH ranked AS (
+       SELECT r.id, r.resource_type, r.value, rv.method, rv.verified_at,
+              rv.reverify_due_at, rv.grace_expires_at, rv.created_at,
+              ROW_NUMBER() OVER (
+                PARTITION BY r.resource_type, r.value
+                ORDER BY (rv.verified_at IS NOT NULL) DESC, rv.created_at DESC
+              ) AS position
+       FROM resources r
+       JOIN resource_verifications rv ON rv.resource_id = r.id
+       WHERE rv.user_id = ?
+     )
+     SELECT id, resource_type, value, method, verified_at, reverify_due_at, grace_expires_at
+     FROM ranked WHERE position = 1 ORDER BY created_at DESC`
   )
     .bind(userId)
     .all();
   return c.json(r.results);
 });
 
-// Register a resource + start a verification attempt
-const VALID_METHODS = ["dns_txt", "magic_link"];
+// Register a resource + start the method dictated by its resource type.
 
 resources.post("/", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json<{
     resourceType?: string;
     value?: string;
-    method?: string;
-    scopes?: string[];
   }>().catch(() => null);
 
   if (!body) return c.json({ error: "invalid-json-body" }, 400);
 
-  const missing = ["resourceType", "value", "method"].filter(
+  const missing = ["resourceType", "value"].filter(
     (k) => !body[k as keyof typeof body]
   );
   if (missing.length > 0) {
     return c.json({ error: "missing-fields", fields: missing }, 400);
   }
-  if (!VALID_METHODS.includes(body.method!)) {
-    return c.json({ error: "invalid-method", allowed: VALID_METHODS }, 400);
+  if (!(body.resourceType! in RESOURCE_METHODS)) {
+    return c.json({ error: "invalid-resource-type", allowed: Object.keys(RESOURCE_METHODS) }, 400);
   }
-  if (!Array.isArray(body.scopes) || body.scopes.length === 0) {
-    return c.json({ error: "missing-scopes" }, 400);
-  }
-
-  const method = body.method as "dns_txt" | "magic_link";
+  const resourceType = body.resourceType as ResourceType;
+  const value = normalizeResource(resourceType, body.value!);
+  if (!value) return c.json({ error: resourceType === "email_address" ? "invalid-email-address" : "invalid-zone" }, 400);
+  const method = RESOURCE_METHODS[resourceType];
 
   let resourceId: string;
   let verificationId: string;
   const token = generateVerificationToken();
 
   try {
-    resourceId = await findOrCreateResource(c.env, userId, body.resourceType!, body.value!);
+    resourceId = await findOrCreateResource(c.env, userId, resourceType, value);
     if (await hasActiveVerification(c.env, resourceId, userId)) {
-      const scopes = await grantAccess(c.env, resourceId, userId, body.scopes);
-      return c.json({ resourceId, alreadyVerified: true, scopes }, 200);
+      await grantAccess(c.env, resourceId, userId);
+      return c.json({ resourceId, alreadyVerified: true }, 200);
     }
 
     const verification = await c.env.DB.prepare(
@@ -197,15 +200,8 @@ resources.post("/", async (c) => {
 
     verificationId = verification?.id ?? id();
 
-    // Only count an email that can actually be sent. DNS-TXT checks do not
-    // consume this budget, and a missing profile email does not either.
+    // Only magic-link delivery consumes this budget. DNS-TXT checks do not.
     if (method === "magic_link") {
-      const user = await c.env.DB.prepare("SELECT email FROM users WHERE id = ?")
-        .bind(userId)
-        .first<{ email: string }>();
-      if (!user?.email) {
-        return c.json({ resourceId, verificationId, emailSent: false, emailError: "no-user-email-on-file" }, 201);
-      }
       const limit = await checkAndIncrementVerifyEmailLimit(c.env, userId);
       if (!limit.allowed) {
         return c.json({ error: "verify-email-daily-limit-exceeded", maxPerDay: limit.maxPerDay }, 429);
@@ -226,7 +222,7 @@ resources.post("/", async (c) => {
          grace_expires_at = NULL,
          created_at = unixepoch()`
     )
-      .bind(verificationId, resourceId, userId, method, token, JSON.stringify(body.scopes))
+      .bind(verificationId, resourceId, userId, method, token, "[]")
       .run();
   } catch (e) {
     return c.json({ error: "database-error", detail: String(e) }, 500);
@@ -237,27 +233,15 @@ resources.post("/", async (c) => {
       resourceId,
       verificationId,
       instructions: {
-        record: verificationRecordName(body.value!),
+        record: verificationRecordName(value),
         type: "TXT",
         value: token,
       },
     }, 201);
   }
 
-  // magic_link — the user was checked before the pending attempt was saved.
-  const user = await c.env.DB.prepare("SELECT email FROM users WHERE id = ?")
-    .bind(userId)
-    .first<{ email: string }>();
-
-  if (!user?.email) {
-    return c.json({
-      resourceId, verificationId,
-      emailSent: false, emailError: "no-user-email-on-file",
-    }, 201);
-  }
-
   const confirmUrl = `https://verify.api.kitsos.net/resources/${resourceId}/confirm?token=${token}`;
-  const result = await sendMagicLinkEmail(c.env, user.email, confirmUrl, body.value!);
+  const result = await sendMagicLinkEmail(c.env, value, confirmUrl, value);
 
   return c.json({
     resourceId, verificationId,
@@ -301,14 +285,14 @@ resources.post("/:resourceId/check-dns", async (c) => {
   const resourceId = c.req.param("resourceId");
 
   const verification = await c.env.DB.prepare(
-    `SELECT rv.id, rv.token, rv.pending_scopes, r.value
+    `SELECT rv.id, rv.token, r.value
      FROM resource_verifications rv
      JOIN resources r ON r.id = rv.resource_id
      WHERE rv.resource_id = ? AND rv.user_id = ? AND rv.method = 'dns_txt' AND rv.verified_at IS NULL
      ORDER BY rv.created_at DESC LIMIT 1`
   )
     .bind(resourceId, userId)
-    .first<{ id: string; token: string; pending_scopes: string; value: string }>();
+    .first<{ id: string; token: string; value: string }>();
 
   if (!verification) return c.json({ error: "no-pending-verification" }, 404);
 
@@ -323,13 +307,13 @@ resources.post("/:resourceId/check-dns", async (c) => {
 
   await c.env.DB.prepare(
     `UPDATE resource_verifications
-     SET verified_at = unixepoch(), reverify_due_at = ?, grace_expires_at = ?
+     SET verified_at = unixepoch(), reverify_due_at = ?, grace_expires_at = NULL
      WHERE id = ?`
   )
-    .bind(daysFromNow(DNS_REVERIFY_DAYS), daysFromNow(DNS_REVERIFY_DAYS + DNS_GRACE_DAYS), verification.id)
+    .bind(tomorrow(), verification.id)
     .run();
 
-  await grantAccess(c.env, resourceId, userId, JSON.parse(verification.pending_scopes));
+  await grantAccess(c.env, resourceId, userId);
 
   return c.json({ verified: true });
 });
@@ -341,11 +325,11 @@ resources.get("/:resourceId/confirm", async (c) => {
   if (!token) return c.json({ error: "missing-token" }, 400);
 
   const verification = await c.env.DB.prepare(
-    `SELECT id, user_id, pending_scopes FROM resource_verifications
+    `SELECT id, user_id FROM resource_verifications
      WHERE resource_id = ? AND token = ? AND method = 'magic_link' AND verified_at IS NULL`
   )
     .bind(resourceId, token)
-    .first<{ id: string; user_id: string; pending_scopes: string }>();
+    .first<{ id: string; user_id: string }>();
 
   if (!verification) return c.json({ error: "invalid-or-expired-token" }, 404);
 
@@ -355,17 +339,13 @@ resources.get("/:resourceId/confirm", async (c) => {
 
   await c.env.DB.prepare(
     `UPDATE resource_verifications
-     SET verified_at = unixepoch(), reverify_due_at = ?, grace_expires_at = ?
+     SET verified_at = unixepoch(), reverify_due_at = NULL, grace_expires_at = NULL
      WHERE id = ?`
   )
-    .bind(
-      daysFromNow(MAGIC_LINK_REVERIFY_DAYS),
-      daysFromNow(MAGIC_LINK_REVERIFY_DAYS + MAGIC_LINK_GRACE_DAYS),
-      verification.id
-    )
+    .bind(verification.id)
     .run();
 
-  await grantAccess(c.env, resourceId, verification.user_id, JSON.parse(verification.pending_scopes));
+  await grantAccess(c.env, resourceId, verification.user_id);
 
   return c.json({ verified: true });
 });
@@ -403,4 +383,63 @@ app.route("/admin", admin);
 
 app.get("/health", (c) => c.json({ ok: true }));
 
-export default withTelemetry(app, "verify");
+type VerifiedZone = {
+  id: string;
+  token: string;
+  value: string;
+};
+
+async function recheckVerifiedZones(env: Env) {
+  let afterId = "";
+  for (;;) {
+    const page = await env.DB.prepare(
+      `SELECT rv.id, rv.token, r.value
+       FROM resource_verifications rv
+       JOIN resources r ON r.id = rv.resource_id
+       WHERE r.resource_type = 'zone'
+         AND rv.method = 'dns_txt'
+         AND rv.verified_at IS NOT NULL
+         AND rv.id > ?
+       ORDER BY rv.id
+       LIMIT 100`
+    ).bind(afterId).all<VerifiedZone>();
+
+    if (page.results.length === 0) break;
+
+    for (let offset = 0; offset < page.results.length; offset += 10) {
+      await Promise.all(page.results.slice(offset, offset + 10).map(async (verification) => {
+        try {
+          const records = await lookupTxtRecords(verificationRecordName(verification.value));
+          if (records.includes(verification.token)) {
+            await env.DB.prepare(
+              "UPDATE resource_verifications SET reverify_due_at = ? WHERE id = ?"
+            ).bind(tomorrow(), verification.id).run();
+          } else {
+            await env.DB.prepare(
+              `UPDATE resource_verifications
+               SET verified_at = NULL, reverify_due_at = NULL, grace_expires_at = NULL
+               WHERE id = ?`
+            ).bind(verification.id).run();
+          }
+        } catch {
+          // A resolver/network failure is not proof that ownership was lost.
+          // Leave the last verified state intact and try again on the next run.
+        }
+      }));
+    }
+
+    afterId = page.results[page.results.length - 1].id;
+    if (page.results.length < 100) break;
+  }
+}
+
+const telemetryHandler = withTelemetry(app, "verify");
+
+export default {
+  fetch(request, env, ctx) {
+    return telemetryHandler.fetch!(request, env, ctx);
+  },
+  scheduled(_event, env, ctx) {
+    ctx.waitUntil(recheckVerifiedZones(env));
+  },
+} satisfies ExportedHandler<Env>;
