@@ -4,6 +4,7 @@ import { sha256Hex } from "@kitsos/auth";
 import type { ApiKeyResourceGrant } from "@kitsos/auth";
 import { recordEvent, withTelemetry } from "@kitsos/telemetry";
 import { requireAdmin, requireUser } from "./middleware";
+import analytics from "./analytics";
 import type { Env } from "./env";
 
 type Vars = { userId: string };
@@ -468,6 +469,7 @@ me.post("/limit-increase-requests", async (c) => {
 });
 
 app.route("/me", me);
+app.route("/analytics", analytics);
 
 app.get("/health", (c) => c.json({ ok: true }));
 
