@@ -52,6 +52,28 @@ WHERE true
 ON CONFLICT(user_id, app_id, limit_type, is_override)
 DO UPDATE SET limit_value = excluded.limit_value;
 
+-- Compatibility with the original many-app key schema still present in
+-- production. Current keys use api_keys.app_id, but these legacy rows must
+-- not prevent revoked or expired credentials from being deleted.
+CREATE TABLE IF NOT EXISTS api_key_apps (
+  api_key_id TEXT NOT NULL REFERENCES api_keys(id),
+  app_id TEXT NOT NULL REFERENCES apps(id),
+  PRIMARY KEY (api_key_id, app_id)
+);
+CREATE TABLE IF NOT EXISTS api_key_resource_grants (
+  api_key_id TEXT NOT NULL REFERENCES api_keys(id),
+  resource_type TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  scopes TEXT NOT NULL DEFAULT '[]',
+  PRIMARY KEY (api_key_id, resource_type, resource_id)
+);
+CREATE TRIGGER cleanup_legacy_api_key_relations
+BEFORE DELETE ON api_keys
+BEGIN
+  DELETE FROM api_key_apps WHERE api_key_id = OLD.id;
+  DELETE FROM api_key_resource_grants WHERE api_key_id = OLD.id;
+END;
+
 DELETE FROM api_keys WHERE status = 'revoked';
 DELETE FROM resource_verifications
 WHERE verified_at IS NULL

@@ -13,6 +13,7 @@ crons = ["17 3 * * *"]
 binding = "DB"
 database_name = "kitsos-api"
 database_id = "c5ccab68-5f60-4b28-8ce9-20c57b8622ea"
+migrations_dir = "../../packages/auth"
 
 [[kv_namespaces]]
 binding = "AUTH_CACHE"
