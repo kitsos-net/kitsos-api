@@ -19,7 +19,7 @@ export interface AuthContext {
 
 export interface CheckResult {
   allowed: boolean;
-  status: number;           // 401 | 403 | 429 | 200
+  status: number;           // 200 | 401 | 403 | 429 | 503
   reason?: string;          // machine-readable, mirrors X-Forbidden-Reason
   retryAfterSeconds?: number;
 }

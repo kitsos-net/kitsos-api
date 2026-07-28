@@ -43,8 +43,23 @@ app.post("/webhook/:webhookId", async (c) => {
   const webhookId = c.req.param("webhookId");
   const rate = await checkRateLimit(c.env, `mail:webhook:${webhookId}`, { windowSeconds: 60, maxRequests: 30 });
   if (!rate.allowed) {
-    recordRateLimitDecision(APP_ID, "webhook", "rate_limited", rate.retryAfterSeconds);
-    return withRetryAfter(c.json({ error: rate.reason }, 429), rate);
+    const storageUnavailable = rate.status === 503;
+    recordRateLimitDecision(
+      APP_ID,
+      "webhook",
+      storageUnavailable ? "error" : "rate_limited",
+      rate.retryAfterSeconds,
+      rate.reason
+    );
+    return withRetryAfter(c.json(
+      {
+        error: rate.reason,
+        ...(storageUnavailable
+          ? { message: "Rate-limit checks are temporarily unavailable. Retry later." }
+          : {}),
+      },
+      storageUnavailable ? 503 : 429
+    ), rate);
   }
   const providedSecret = c.req.header("X-Webhook-Secret") ?? "";
   if (!providedSecret) return c.json({ error: "missing-secret" }, 401);
@@ -97,7 +112,7 @@ app.post("/webhook/:webhookId", async (c) => {
   const usage = await checkUsageLimitForUser(c.env, webhook.user_id, APP_ID, {
     limitType: "emails_per_day", cost: JSON.parse(webhook.to_addresses).length,
   });
-  if (!usage.allowed) return withRetryAfter(c.json({ error: usage.reason }, 429), usage);
+  if (!usage.allowed) return withRetryAfter(c.json({ error: usage.reason }, usage.status as 429 | 503), usage);
   const result = await sendViaBrevo(c.env, {
     from: webhook.from_address,
     to: JSON.parse(webhook.to_addresses),
@@ -214,7 +229,7 @@ app.post("/send", async (c) => {
   if (!grant.allowed) return c.json({ error: grant.reason }, grant.status as 403);
 
   const usage = await checkUsageLimitForUser(c.env, ctx.userId, APP_ID, { limitType: "emails_per_day", cost: body.to.length });
-  if (!usage.allowed) return withRetryAfter(c.json({ error: usage.reason }, 429), usage);
+  if (!usage.allowed) return withRetryAfter(c.json({ error: usage.reason }, usage.status as 429 | 503), usage);
 
   let html = body.html;
   if (body.template) {

@@ -164,24 +164,38 @@ export async function checkRateLimit(
   const windowStart = Math.floor(Date.now() / 1000 / options.windowSeconds);
   const kvKey = `rl:${bucketKey}:${windowStart}`;
 
-  const current = await env.USAGE_COUNTERS.get(kvKey);
-  const count = current ? parseInt(current, 10) : 0;
+  try {
+    const current = await env.USAGE_COUNTERS.get(kvKey);
+    const count = current ? parseInt(current, 10) : 0;
 
-  if (count >= options.maxRequests) {
-    const now = Math.floor(Date.now() / 1000);
+    if (count >= options.maxRequests) {
+      const now = Math.floor(Date.now() / 1000);
+      return {
+        allowed: false,
+        status: 429,
+        reason: "rate-limit-exceeded",
+        retryAfterSeconds: Math.max(1, options.windowSeconds - (now % options.windowSeconds)),
+      };
+    }
+
+    await env.USAGE_COUNTERS.put(kvKey, String(count + 1), {
+      expirationTtl: options.windowSeconds + 5,
+    });
+
+    return { allowed: true, status: 200 };
+  } catch (error) {
+    console.error(JSON.stringify({
+      event: "rate_limit.storage.error",
+      reason: "rate-limit-storage-unavailable",
+      error: error instanceof Error ? error.message : "unknown-kv-error",
+    }));
     return {
       allowed: false,
-      status: 429,
-      reason: "rate-limit-exceeded",
-      retryAfterSeconds: Math.max(1, options.windowSeconds - (now % options.windowSeconds)),
+      status: 503,
+      reason: "rate-limit-storage-unavailable",
+      retryAfterSeconds: 60,
     };
   }
-
-  await env.USAGE_COUNTERS.put(kvKey, String(count + 1), {
-    expirationTtl: options.windowSeconds + 5,
-  });
-
-  return { allowed: true, status: 200 };
 }
 
 /** Returns the most specific configured rate limit, or the safe default. */
@@ -250,27 +264,43 @@ export async function checkUsageLimitForUser(
 
   const dayBucket = Math.floor(Date.now() / 1000 / 86400);
   const kvKey = `usage:${userId}:${appId}:${options.limitType}:${dayBucket}`;
-  const current = await env.USAGE_COUNTERS.get(kvKey);
-  const count = current ? parseInt(current, 10) : 0;
   const cost = options.cost ?? 1;
 
-  if (count + cost > limitValue) {
-    const now = Math.floor(Date.now() / 1000);
-    recordUsageDecision(userId, appId, options.limitType, "denied", count, cost, limitValue, "usage-limit-exceeded");
+  try {
+    const current = await env.USAGE_COUNTERS.get(kvKey);
+    const count = current ? parseInt(current, 10) : 0;
+
+    if (count + cost > limitValue) {
+      const now = Math.floor(Date.now() / 1000);
+      recordUsageDecision(userId, appId, options.limitType, "denied", count, cost, limitValue, "usage-limit-exceeded");
+      return {
+        allowed: false,
+        status: 429,
+        reason: "usage-limit-exceeded",
+        retryAfterSeconds: Math.max(1, 86400 - (now % 86400)),
+      };
+    }
+
+    await env.USAGE_COUNTERS.put(kvKey, String(count + cost), {
+      expirationTtl: 172800, // 48h
+    });
+
+    recordUsageDecision(userId, appId, options.limitType, "allowed", count, cost, limitValue);
+    return { allowed: true, status: 200 };
+  } catch (error) {
+    console.error(JSON.stringify({
+      event: "usage_limit.storage.error",
+      reason: "usage-limit-storage-unavailable",
+      error: error instanceof Error ? error.message : "unknown-kv-error",
+    }));
+    recordUsageDecision(userId, appId, options.limitType, "error", 0, cost, limitValue, "usage-limit-storage-unavailable");
     return {
       allowed: false,
-      status: 429,
-      reason: "usage-limit-exceeded",
-      retryAfterSeconds: Math.max(1, 86400 - (now % 86400)),
+      status: 503,
+      reason: "usage-limit-storage-unavailable",
+      retryAfterSeconds: 60,
     };
   }
-
-  await env.USAGE_COUNTERS.put(kvKey, String(count + cost), {
-    expirationTtl: 172800, // 48h
-  });
-
-  recordUsageDecision(userId, appId, options.limitType, "allowed", count, cost, limitValue);
-  return { allowed: true, status: 200 };
 }
 
 /** Enforces optional per-key resource allow-lists. Session auth is unrestricted. */

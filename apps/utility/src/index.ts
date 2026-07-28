@@ -35,7 +35,7 @@ app.use("*", async (c, next) => {
 });
 
 function clientIp(request: Request) { return request.headers.get("CF-Connecting-IP") ?? "unknown"; }
-function text(c: UtilityContext, body: string, status: 200 | 400 | 404 | 429 | 502 = 200) {
+function text(c: UtilityContext, body: string, status: 200 | 400 | 404 | 429 | 502 | 503 = 200) {
   return c.text(body, status, { "Content-Type": "text/plain; charset=utf-8" });
 }
 function int(value: string | undefined, fallback: number) {
@@ -51,14 +51,32 @@ async function authorize(c: UtilityContext, scope: string): Promise<Response | n
   if (!c.req.header("Authorization")) {
     const rate = await checkRateLimit(c.env, `utility:public:${clientIp(c.req.raw)}`, PUBLIC_RATE_LIMIT);
     if (!rate.allowed) {
-      recordRateLimitDecision(APP_ID, "public-ip", "rate_limited", rate.retryAfterSeconds);
-      return withRetryAfter(c.json({ error: "public-rate-limit-exceeded", message: "The public limit is exhausted. Use a Kitsos API key for higher limits." }, 429), rate);
+      const storageUnavailable = rate.status === 503;
+      recordRateLimitDecision(
+        APP_ID,
+        "public-ip",
+        storageUnavailable ? "error" : "rate_limited",
+        rate.retryAfterSeconds,
+        rate.reason
+      );
+      return withRetryAfter(c.json(
+        storageUnavailable
+          ? {
+              error: "rate-limit-storage-unavailable",
+              message: "Rate-limit checks are temporarily unavailable. Retry later.",
+            }
+          : {
+              error: "public-rate-limit-exceeded",
+              message: "The public limit is exhausted. Use a Kitsos API key for higher limits.",
+            },
+        storageUnavailable ? 503 : 429
+      ), rate);
     }
     c.set("authenticated", false);
     return null;
   }
   const auth = await authenticateApiKey(c.req.raw, c.env, scope, APP_ID, KEY_RATE_LIMIT);
-  if (!auth.allowed) return withRetryAfter(c.json({ error: auth.reason }, auth.status as 401 | 403 | 429), auth);
+  if (!auth.allowed) return withRetryAfter(c.json({ error: auth.reason }, auth.status as 401 | 403 | 429 | 503), auth);
   c.set("authenticated", true);
   return null;
 }

@@ -13,9 +13,11 @@ type DecisionFields = {
 export function recordAuthDecision(fields: DecisionFields): void {
   const span = trace.getActiveSpan();
   if (!span) return;
-  const eventOutcome = fields.reason?.includes("rate-limit")
+  const eventOutcome = fields.reason === "rate-limit-exceeded"
     ? "rate_limited"
-    : fields.outcome;
+    : fields.reason === "rate-limit-storage-unavailable"
+      ? "error"
+      : fields.outcome;
   const attributes = {
     "event.name": "auth.decision",
     "event.category": "authentication",
@@ -72,7 +74,7 @@ export function recordUsageDecision(
   userId: string,
   appId: string,
   limitType: string,
-  outcome: "allowed" | "denied",
+  outcome: "allowed" | "denied" | "error",
   current: number,
   cost: number,
   limit: number,
@@ -80,7 +82,7 @@ export function recordUsageDecision(
 ): void {
   const span = trace.getActiveSpan();
   if (!span) return;
-  const eventOutcome = reason?.includes("limit") && outcome === "denied"
+  const eventOutcome = reason === "usage-limit-exceeded" && outcome === "denied"
     ? "rate_limited"
     : outcome;
   const attributes = {
@@ -108,12 +110,14 @@ export function recordUsageDecision(
 export function recordRateLimitDecision(
   appId: string,
   bucket: string,
-  outcome: "allowed" | "rate_limited",
-  retryAfterSeconds?: number
+  outcome: "allowed" | "rate_limited" | "error",
+  retryAfterSeconds?: number,
+  failureReason?: string
 ): void {
   const span = trace.getActiveSpan();
   if (!span) return;
-  const reason = outcome === "rate_limited" ? "rate-limit-exceeded" : undefined;
+  const reason = failureReason
+    ?? (outcome === "rate_limited" ? "rate-limit-exceeded" : undefined);
   const attributes = {
     "event.name": "rate_limit.decision",
     "event.category": "rate_limit",
