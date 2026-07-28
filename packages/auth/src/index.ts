@@ -1,21 +1,23 @@
 import type { Env, AuthContext, CheckResult, RateLimitOptions } from "./types";
 import { verifyClerkSession, ensureUserRow } from "./clerk";
-import { annotateAuthenticatedRequest, recordAuthDecision } from "./telemetry";
 import {
   validateApiKey,
   checkScope,
   checkResourceGrant,
   checkRateLimit,
-  resolveRateLimit,
   checkUsageLimit,
-  checkUsageLimitForUser,
-  getUsageLimit,
-  checkKeyResourceAccess,
   writeAuditLog,
   sha256Hex,
+  constantTimeEqual,
+  getPolicyScopes,
+  invalidateApiKeyCache,
+  invalidateAppApiKeyCaches,
+  invalidateGroupApiKeyCaches,
+  invalidateUserApiKeyCaches,
 } from "./checks";
 
 export * from "./types";
+export * from "./limits";
 export {
   verifyClerkSession,
   ensureUserRow,
@@ -23,106 +25,25 @@ export {
   checkScope,
   checkResourceGrant,
   checkRateLimit,
-  resolveRateLimit,
   checkUsageLimit,
-  checkUsageLimitForUser,
-  getUsageLimit,
-  checkKeyResourceAccess,
   writeAuditLog,
   sha256Hex,
+  constantTimeEqual,
+  getPolicyScopes,
+  invalidateApiKeyCache,
+  invalidateAppApiKeyCaches,
+  invalidateGroupApiKeyCaches,
+  invalidateUserApiKeyCaches,
 };
 
-/** Applies RFC 9110's Retry-After header when a limiter rejected a request. */
-export function withRetryAfter(response: Response, check: CheckResult): Response {
-  if (check.status === 429 && check.retryAfterSeconds) {
-    response.headers.set("Retry-After", String(check.retryAfterSeconds));
+export function withRetryAfter(response: Response, result: CheckResult): Response {
+  if (result.retryAfterSeconds) {
+    response.headers.set("Retry-After", String(result.retryAfterSeconds));
   }
   return response;
 }
 
 const DEFAULT_RATE_LIMIT: RateLimitOptions = { windowSeconds: 60, maxRequests: 60 };
-
-/**
- * API-key-only variant for machine-facing endpoints. Unlike authenticate(),
- * this never falls back to a Clerk session token.
- */
-export async function authenticateApiKey(
-  request: Request,
-  env: Env,
-  requiredScope: string,
-  appId: string,
-  rateLimit: RateLimitOptions = DEFAULT_RATE_LIMIT
-): Promise<CheckResult & { context?: AuthContext }> {
-  const authHeader = request.headers.get("Authorization") ?? "";
-  const token = authHeader.replace(/^Bearer\s+/i, "");
-
-  if (!token) {
-    recordAuthDecision({ appId, requiredScope, outcome: "denied", reason: "missing-credentials" });
-    return { allowed: false, status: 401, reason: "missing-credentials" };
-  }
-  if (!token.startsWith("kitsos_")) {
-    recordAuthDecision({
-      appId,
-      requiredScope,
-      outcome: "denied",
-      reason: "api-key-required",
-      keyFingerprint: (await sha256Hex(token)).slice(0, 16),
-    });
-    return { allowed: false, status: 401, reason: "api-key-required" };
-  }
-
-  const context = await validateApiKey(token, appId, env);
-  if (!context) {
-    recordAuthDecision({
-      appId,
-      requiredScope,
-      outcome: "denied",
-      reason: "invalid-credentials",
-      keyFingerprint: (await sha256Hex(token)).slice(0, 16),
-    });
-    return { allowed: false, status: 401, reason: "invalid-credentials" };
-  }
-  annotateAuthenticatedRequest(context, appId, requiredScope);
-
-  const scopeCheck = checkScope(context, requiredScope);
-  if (!scopeCheck.allowed) {
-    await writeAuditLog(env, {
-      userId: context.userId,
-      appId,
-      apiKeyId: context.apiKeyId,
-      action: requiredScope,
-      result: "denied",
-      reason: scopeCheck.reason,
-    });
-    recordAuthDecision({ appId, requiredScope, outcome: "denied", reason: scopeCheck.reason, context });
-    return scopeCheck;
-  }
-
-  const rlCheck = await checkRateLimit(env, `${appId}:${context.apiKeyId!}`, await resolveRateLimit(env, appId, requiredScope, rateLimit));
-  if (!rlCheck.allowed) {
-    await writeAuditLog(env, {
-      userId: context.userId,
-      appId,
-      apiKeyId: context.apiKeyId,
-      action: requiredScope,
-      result: "denied",
-      reason: rlCheck.reason,
-    });
-    recordAuthDecision({ appId, requiredScope, outcome: "denied", reason: rlCheck.reason, context });
-    return rlCheck;
-  }
-
-  await writeAuditLog(env, {
-    userId: context.userId,
-    appId,
-    apiKeyId: context.apiKeyId,
-    action: requiredScope,
-    result: "allowed",
-  });
-  recordAuthDecision({ appId, requiredScope, outcome: "allowed", context });
-
-  return { allowed: true, status: 200, context };
-}
 
 /**
  * Standard entry point for app workers. Pulls credentials from the
@@ -148,8 +69,10 @@ export async function authenticate(
   const token = authHeader.replace(/^Bearer\s+/i, "");
 
   if (!token) {
-    recordAuthDecision({ appId, requiredScope, outcome: "denied", reason: "missing-credentials" });
     return { allowed: false, status: 401, reason: "missing-credentials" };
+  }
+  if (token.length > 8192) {
+    return { allowed: false, status: 401, reason: "invalid-credentials" };
   }
 
   let context: AuthContext | null = null;
@@ -160,21 +83,22 @@ export async function authenticate(
     const session = await verifyClerkSession(token, env);
     if (session) {
       await ensureUserRow(session.userId, env);
-      context = {
-        method: "session",
-        userId: session.userId,
-        appId,
-        scopes: [requiredScope], // session auth (Admin UI etc.) trusted at full scope; refine per-app if needed
-        groupIds: [],
-      };
+      const policy = await getPolicyScopes(env, session.userId, appId);
+      if (policy) {
+        context = {
+          method: "session",
+          userId: session.userId,
+          appId,
+          scopes: policy.scopes,
+          groupIds: policy.groupIds,
+        };
+      }
     }
   }
 
   if (!context) {
-    recordAuthDecision({ appId, requiredScope, outcome: "denied", reason: "invalid-credentials" });
     return { allowed: false, status: 401, reason: "invalid-credentials" };
   }
-  annotateAuthenticatedRequest(context, appId, requiredScope);
 
   const scopeCheck = checkScope(context, requiredScope);
   if (!scopeCheck.allowed) {
@@ -186,14 +110,13 @@ export async function authenticate(
       result: "denied",
       reason: scopeCheck.reason,
     });
-    recordAuthDecision({ appId, requiredScope, outcome: "denied", reason: scopeCheck.reason, context });
     return scopeCheck;
   }
 
   const rlCheck = await checkRateLimit(
     env,
-    `${appId}:${context.apiKeyId ?? `session:${context.userId}`}`,
-    await resolveRateLimit(env, appId, requiredScope, rateLimit)
+    context.apiKeyId ?? `session:${context.userId}`,
+    rateLimit
   );
   if (!rlCheck.allowed) {
     await writeAuditLog(env, {
@@ -204,7 +127,6 @@ export async function authenticate(
       result: "denied",
       reason: rlCheck.reason,
     });
-    recordAuthDecision({ appId, requiredScope, outcome: "denied", reason: rlCheck.reason, context });
     return rlCheck;
   }
 
@@ -215,7 +137,6 @@ export async function authenticate(
     action: requiredScope,
     result: "allowed",
   });
-  recordAuthDecision({ appId, requiredScope, outcome: "allowed", context });
 
   return { allowed: true, status: 200, context };
 }
@@ -236,6 +157,9 @@ export async function authenticateApiKey(
   const token = authHeader.replace(/^Bearer\s+/i, "");
 
   if (!token) return { allowed: false, status: 401, reason: "missing-credentials" };
+  if (token.length > 256) {
+    return { allowed: false, status: 401, reason: "invalid-credentials" };
+  }
   if (!token.startsWith("kitsos_")) {
     return { allowed: false, status: 401, reason: "api-key-required" };
   }

@@ -5,4 +5,5 @@ export interface Env extends AuthEnv, TelemetryEnv {
   ADMIN_GROUP_ID: string;
   MAIL_API_KEY: string;
   MAIL_FROM_ADDRESS?: string;
+  CORS_ORIGINS?: string;
 }

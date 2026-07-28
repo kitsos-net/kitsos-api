@@ -1,52 +1,9 @@
-import { instrument, OTLPExporter, ResolveConfigFn } from "@microlabs/otel-cf-workers";
-import { SpanStatusCode, trace, type Attributes } from "@opentelemetry/api";
+import { instrument, ResolveConfigFn } from "@microlabs/otel-cf-workers";
+import type { Attributes } from "@opentelemetry/api";
 
 export interface TelemetryEnv {
   AXIOM_TOKEN: string;
   AXIOM_DATASET: string;
-}
-
-export type EventFields = Record<string, string | number | boolean | undefined>;
-
-/**
- * Adds a query-friendly semantic event to the active request span.
- * Never pass credentials, confirmation tokens, message bodies, or secrets.
- */
-export function recordEvent(
-  name: string,
-  outcome: "success" | "denied" | "error" | "noop",
-  fields: EventFields = {}
-): void {
-  const span = trace.getActiveSpan();
-  if (!span) return;
-  const attributes: Attributes = {
-    "event.name": name,
-    "event.outcome": outcome,
-  };
-  for (const [key, value] of Object.entries(fields)) {
-    if (value !== undefined) attributes[key] = value;
-  }
-  span.addEvent(name, attributes);
-  span.setAttributes({
-    "kitsos.event.name": name,
-    "kitsos.event.outcome": outcome,
-    ...attributes,
-  });
-}
-
-export function recordError(
-  name: string,
-  errorCode: string,
-  message: string,
-  fields: EventFields = {}
-): void {
-  const span = trace.getActiveSpan();
-  recordEvent(name, "error", {
-    ...fields,
-    "error.code": errorCode,
-    "error.message": message,
-  });
-  span?.setStatus({ code: SpanStatusCode.ERROR, message: errorCode });
 }
 
 /**
@@ -63,39 +20,42 @@ export function withTelemetry<Env extends TelemetryEnv>(
   handler: ExportedHandler<Env>,
   serviceName: string
 ) {
-  const config: ResolveConfigFn = (env: Env) => {
-    const exporter = new OTLPExporter({
-      url: "https://eu-central-1.aws.edge.axiom.co/v1/traces",
+  const redactUrl = (value: string): string => {
+    try {
+      const url = new URL(value);
+      for (const name of ["token", "key", "secret"]) {
+        if (url.searchParams.has(name)) url.searchParams.set(name, "[REDACTED]");
+      }
+      return url.toString();
+    } catch {
+      return value;
+    }
+  };
+
+  const config: ResolveConfigFn = (env: Env) => ({
+    exporter: {
+      url: "https://api.axiom.co/v1/traces",
       headers: {
         Authorization: `Bearer ${env.AXIOM_TOKEN}`,
         "X-Axiom-Dataset": env.AXIOM_DATASET,
       },
-    });
-    const reportingExporter = {
-      export(
-        spans: Parameters<OTLPExporter["export"]>[0],
-        callback: Parameters<OTLPExporter["export"]>[1]
-      ) {
-        exporter.export(spans, (result) => {
-          if (result.error) {
-            console.error(JSON.stringify({
-              event: "telemetry.export.failed",
-              service: serviceName,
-              error: result.error.message,
-            }));
-          }
-          callback(result);
-        });
-      },
-      shutdown: () => exporter.shutdown(),
-    };
-    return {
-      exporter: reportingExporter,
-      service: { name: serviceName },
-      // Request statistics must be exact rather than extrapolated from a sample.
-      sampling: { headSampler: { ratio: 1 } },
-    };
-  };
+    },
+    service: { name: serviceName },
+    postProcessor: (spans) => spans.map((span) => {
+      const attributes = span.attributes as Attributes;
+      if (typeof attributes["url.full"] === "string") {
+        attributes["url.full"] = redactUrl(attributes["url.full"]);
+      }
+      if (typeof attributes["url.query"] === "string") {
+        const query = new URLSearchParams(attributes["url.query"].replace(/^\?/, ""));
+        for (const name of ["token", "key", "secret"]) {
+          if (query.has(name)) query.set(name, "[REDACTED]");
+        }
+        attributes["url.query"] = query.size > 0 ? `?${query}` : "";
+      }
+      return span;
+    }),
+  });
 
   return instrument(handler, config);
 }

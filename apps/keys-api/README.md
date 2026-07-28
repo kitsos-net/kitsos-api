@@ -1,6 +1,6 @@
 # keys-api
 
-`keys.api.kitsos.net` — the management API for the whole Kitsos API
+`keys.api.kitsos.net/v1` — the management API for the whole Kitsos API
 platform: users, groups, apps, policies, API keys, usage limits, and
 audit log. Every other app worker depends on this having real data
 before `@kitsos/auth` can validate anything.

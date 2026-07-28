@@ -20,10 +20,11 @@ const DNS_PROVIDERS = {
 
 type Vars = { authenticated: boolean };
 type UtilityContext = Context<{ Bindings: Env; Variables: Vars }>;
-const app = new Hono<{ Bindings: Env; Variables: Vars }>();
+const app = new Hono<{ Bindings: Env; Variables: Vars }>().basePath("/v1");
 
 app.use("*", cors({ origin: "*", allowHeaders: ["Authorization", "Content-Type"], allowMethods: ["GET", "OPTIONS"] }));
 app.use("*", async (c, next) => {
+  if (c.req.url.length > 8192) return c.json({ error: "uri-too-long" }, 414);
   const startedAt = Date.now();
   await next();
   console.log(JSON.stringify({ service: APP_ID, method: c.req.method, path: new URL(c.req.url).pathname, status: c.res.status, durationMs: Date.now() - startedAt, rayId: c.req.header("CF-Ray") ?? undefined }));
@@ -153,10 +154,37 @@ app.get("/geo/help", async (c) => {
 type DnsAnswer = { name: string; type: number; TTL: number; data: string };
 async function resolveDns(name: string, type: string, resolver: keyof typeof DNS_PROVIDERS) {
   const provider = DNS_PROVIDERS[resolver];
-  const response = await fetch(`${provider.url}?name=${encodeURIComponent(name)}&type=${type}`, { headers: { accept: "application/dns-json" } });
+  const response = await fetch(`${provider.url}?name=${encodeURIComponent(name)}&type=${type}`, {
+    headers: { accept: "application/dns-json" },
+    signal: AbortSignal.timeout(5_000),
+  });
   if (!response.ok) throw new Error("DNS upstream failed");
-  const payload = await response.json<{ Status?: number; ID?: number; Flags?: number; Question?: unknown[]; Answer?: DnsAnswer[]; Authority?: DnsAnswer[]; Additional?: DnsAnswer[] }>();
-  return { id: payload.ID ?? null, flags: payload.Flags ?? null, questions: payload.Question ?? [], answers: payload.Answer ?? [], authorities: payload.Authority ?? [], additionals: payload.Additional ?? [] };
+  const declaredLength = Number(response.headers.get("content-length") ?? 0);
+  if (declaredLength > 64 * 1024) throw new Error("DNS upstream response too large");
+  const raw = await response.text();
+  if (new TextEncoder().encode(raw).byteLength > 64 * 1024) {
+    throw new Error("DNS upstream response too large");
+  }
+  const payload = JSON.parse(raw) as {
+    Status?: number;
+    ID?: number;
+    Flags?: number;
+    Question?: unknown[];
+    Answer?: DnsAnswer[];
+    Authority?: DnsAnswer[];
+    Additional?: DnsAnswer[];
+  };
+  const bounded = (rows: DnsAnswer[] | undefined) => (rows ?? [])
+    .filter((row) => typeof row?.data === "string" && row.data.length <= 4096)
+    .slice(0, 100);
+  return {
+    id: payload.ID ?? null,
+    flags: payload.Flags ?? null,
+    questions: (payload.Question ?? []).slice(0, 100),
+    answers: bounded(payload.Answer),
+    authorities: bounded(payload.Authority),
+    additionals: bounded(payload.Additional),
+  };
 }
 async function dnsEndpoint(c: UtilityContext, provider?: keyof typeof DNS_PROVIDERS) {
   const denied = await authorize(c, "utility:dns"); if (denied) return denied;

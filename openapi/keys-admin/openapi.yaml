@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Kitsos Keys Admin API
   description: Administrative API for managing the Kitsos platform. Every endpoint except the health check requires an administrator Clerk session.
-  version: "0.1.0"
+  version: "1.0.0"
   contact:
     name: Kitsos Support
     url: https://kitsos.net/contact
@@ -11,7 +11,7 @@ info:
     name: Proprietary
     url: https://kitsos.net/terms
 servers:
-  - url: https://keys.api.kitsos.net
+  - url: https://keys.api.kitsos.net/v1
     description: Production
 tags:
   - name: Default

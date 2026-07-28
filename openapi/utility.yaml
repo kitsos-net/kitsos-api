@@ -13,7 +13,7 @@ info:
     name: Proprietary
     url: 'https://kitsos.net/terms'
 servers:
-  - url: 'https://utility.api.kitsos.net'
+  - url: 'https://utility.api.kitsos.net/v1'
 tags:
   - { name: Default, description: Health check. }
   - { name: Crypt, description: 'Secure password, token, number and hash operations.' }

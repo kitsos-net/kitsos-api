@@ -1,31 +1,51 @@
 import type { Context, Next } from "hono";
-import { authenticateApiKey, verifyClerkSession, ensureUserRow, withRetryAfter } from "@kitsos/auth";
+import { checkRateLimit, verifyClerkSession, ensureUserRow } from "@kitsos/auth";
 import type { Env } from "./env";
 
-type VerifyContext = Context<{ Bindings: Env; Variables: { userId: string } }>;
+type ContextEnv = { Bindings: Env; Variables: { userId: string } };
 
-/**
- * Authorizes self-service verification routes with a scoped Kitsos API key.
- * Administrative routes intentionally remain Clerk-session-only below.
- */
-export function requireUser(scope: string) {
-  return async (c: VerifyContext, next: Next) => {
-    const auth = await authenticateApiKey(c.req.raw, c.env, scope, "verify");
-    if (!auth.allowed) return withRetryAfter(c.json({ error: auth.reason }, auth.status as 401 | 403 | 429), auth);
-    c.set("userId", auth.context!.userId);
-    await next();
-  };
-}
-
-export async function requireAdmin(c: VerifyContext, next: Next) {
+export async function requireUser(c: Context<ContextEnv>, next: Next) {
   const authHeader = c.req.header("Authorization") ?? "";
   const token = authHeader.replace(/^Bearer\s+/i, "");
   if (!token) return c.json({ error: "missing-credentials" }, 401);
+  if (token.length > 8192) return c.json({ error: "invalid-credentials" }, 401);
 
   const session = await verifyClerkSession(token, c.env);
   if (!session) return c.json({ error: "invalid-credentials" }, 401);
 
   await ensureUserRow(session.userId, c.env);
+  const user = await c.env.DB.prepare("SELECT status FROM users WHERE id = ?")
+    .bind(session.userId)
+    .first<{ status: string }>();
+  if (user?.status !== "active") return c.json({ error: "user-inactive" }, 403);
+  const rateLimit = await checkRateLimit(c.env, `session:${session.userId}`, {
+    windowSeconds: 60,
+    maxRequests: 60,
+  });
+  if (!rateLimit.allowed) return c.json({ error: rateLimit.reason }, 429);
+  c.set("userId", session.userId);
+  await next();
+}
+
+export async function requireAdmin(c: Context<ContextEnv>, next: Next) {
+  const authHeader = c.req.header("Authorization") ?? "";
+  const token = authHeader.replace(/^Bearer\s+/i, "");
+  if (!token) return c.json({ error: "missing-credentials" }, 401);
+  if (token.length > 8192) return c.json({ error: "invalid-credentials" }, 401);
+
+  const session = await verifyClerkSession(token, c.env);
+  if (!session) return c.json({ error: "invalid-credentials" }, 401);
+
+  await ensureUserRow(session.userId, c.env);
+  const user = await c.env.DB.prepare("SELECT status FROM users WHERE id = ?")
+    .bind(session.userId)
+    .first<{ status: string }>();
+  if (user?.status !== "active") return c.json({ error: "user-inactive" }, 403);
+  const rateLimit = await checkRateLimit(c.env, `session:${session.userId}`, {
+    windowSeconds: 60,
+    maxRequests: 60,
+  });
+  if (!rateLimit.allowed) return c.json({ error: rateLimit.reason }, 429);
 
   const membership = await c.env.DB.prepare(
     "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?"

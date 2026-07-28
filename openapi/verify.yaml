@@ -1,53 +1,41 @@
 openapi: 3.0.3
 info:
   title: Kitsos Verify API
-  description: |
-    Platform-wide resource ownership verification. Domains use DNS-TXT;
-    email addresses use a magic link sent to that exact address. Once
-    verified, the resource can be used with every Kitsos API. Email
-    verification is permanent; domain ownership is rechecked daily.
-    API-key scopes still control which operations the key may perform.
-    Every route except the health check and the magic-link confirm endpoint requires a
-    Kitsos API key with a verify:resource:* scope. Admin routes require
-    a Clerk session belonging to the configured admin group.
-  version: "0.1.0"
-  contact:
-    name: Kitsos
-    url: 'https://kitsos.net/contact'
-    email: support@services.kitsos.net
-  termsOfService: 'https://kitsos.net/terms'
-  license:
-    name: Proprietary
-    url: 'https://kitsos.net/terms'
+  description: >
+    Resource ownership verification (DNS-TXT or magic link) — the gate
+    before any resource_grants row gets created. Every route except
+    the health check and the magic-link confirm endpoint requires a
+    Clerk session (no API-key auth path — verification is a human,
+    in-browser action). Magic links are sent only to the email address
+    being verified and expire after 30 minutes; DNS challenges expire
+    after 24 hours.
+  version: "1.0.0"
 servers:
-  - url: 'https://verify.api.kitsos.net'
-tags:
-  - name: Default
-    description: Health check.
-  - name: Resources
-    description: Register and verify owned resources.
-  - name: Admin
-    description: Administrative resource management.
+  - url: https://verify.api.kitsos.net/v1
 
 components:
+  parameters:
+    PageLimit:
+      name: limit
+      in: query
+      schema: { type: integer, default: 100, minimum: 1, maximum: 500 }
+    PageOffset:
+      name: offset
+      in: query
+      schema: { type: integer, default: 0, minimum: 0, maximum: 100000 }
   securitySchemes:
     clerkSession:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: Clerk session JWT for admin endpoints.
-    apiKey:
-      type: http
-      scheme: bearer
-      bearerFormat: Kitsos API key
-      description: Kitsos API key with verify:resource:read, verify:resource:create, or verify:resource:verify.
   schemas:
     ResourceVerification:
       type: object
       properties:
         id: { type: string }
+        app_id: { type: string }
         resource_type: { type: string }
-        value: { type: string }
+        value: { type: string, maxLength: 320 }
         method: { type: string, enum: [dns_txt, magic_link] }
         verified_at: { type: integer, nullable: true }
         reverify_due_at: { type: integer, nullable: true }
@@ -57,13 +45,13 @@ components:
       properties:
         error: { type: string }
 
+security:
+  - clerkSession: []
+
 paths:
   /health:
     get:
       summary: Health check
-      description: "Health check."
-      operationId: getHealth
-      tags: [Default]
       security: []
       responses:
         "200": { description: OK }
@@ -71,10 +59,9 @@ paths:
   /resources:
     get:
       summary: List your own resources and their verification status
-      description: "List your own resources and their verification status."
-      operationId: getResources
-      tags: [Resources]
-      security: [{ apiKey: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageOffset' }
       responses:
         "200":
           description: OK
@@ -82,43 +69,28 @@ paths:
             application/json:
               schema: { type: array, items: { $ref: '#/components/schemas/ResourceVerification' } }
     post:
-      summary: Register and verify ownership of a resource
-      description: "Starts the verification method dictated by resourceType. A zone always uses DNS-TXT and an email_address always receives a magic link. An already verified resource is immediately reusable."
-      operationId: postResources
-      tags: [Resources]
-      security: [{ apiKey: [] }]
+      summary: Register a resource and start a verification attempt
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [resourceType, value]
+              required: [appId, resourceType, value, method, scopes]
               properties:
-                resourceType:
+                appId: { type: string, maxLength: 63 }
+                resourceType: { type: string, maxLength: 64, example: zone }
+                value: { type: string, maxLength: 320, example: domain.de }
+                method:
                   type: string
-                  enum: [zone, email_address]
-                  description: "The ownership type. zone selects DNS-TXT; email_address selects a magic link."
-                  example: zone
-                value:
-                  type: string
-                  description: "A valid domain name or email address matching resourceType."
-                  example: domain.de
+                  enum: [dns_txt, magic_link]
+                  description: magic_link requires resourceType=email_address; dns_txt requires a DNS hostname.
+                scopes: { type: array, minItems: 1, maxItems: 100, items: { type: string, maxLength: 100 } }
       responses:
-        "200":
-          description: The resource was already verified and can be used across all Kitsos APIs.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  resourceId: { type: string }
-                  alreadyVerified: { type: boolean, example: true }
         "201":
           description: >
-            For a zone, returns the DNS TXT record name and value to add.
-            For an email_address, sends the confirm link to that address and
-            returns whether it was sent.
+            For dns_txt: returns the TXT record name/value to add.
+            For magic_link: sends the confirm email and returns whether it was sent.
           content:
             application/json:
               schema:
@@ -135,35 +107,20 @@ paths:
                       value: { type: string }
                   emailSent: { type: boolean, nullable: true }
         "400":
-          description: The resource type or value is missing, unsupported, or invalid.
+          description: Invalid resource, method, or scope
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
         "429":
-          description: Magic-link email budget of 15 per UTC day is exhausted
-
-  /resources/{resourceId}:
-    delete:
-      summary: Remove your own verified ownership claim and its grants
-      description: Remove the authenticated user's ownership verification without affecting claims belonging to other users.
-      operationId: deleteResource
-      tags: [Resources]
-      security: [{ apiKey: [] }]
-      parameters:
-        - { name: resourceId, in: path, required: true, schema: { type: string }, description: Resource identifier. }
-      responses:
-        "204": { description: Ownership claim removed }
-        "404":
-          description: No verified ownership claim belonging to the caller
+          description: Verification-attempt or verified-resource limit exceeded
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        "502":
+          description: The verification email could not be sent
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
 
   /resources/{resourceId}/check-dns:
     post:
-      summary: Check a pending DNS-TXT ownership verification
-      description: "Queries Cloudflare DNS-over-HTTPS and marks the domain as verified platform-wide when the expected TXT token is present."
-      operationId: postResourcesResourceidCheckDns
-      tags: [Resources]
-      security: [{ apiKey: [] }]
+      summary: Check a pending DNS-TXT verification via Cloudflare DoH; creates the resource_grants row on success
       parameters:
-        - { name: resourceId, in: path, required: true, schema: { type: string }, description: "Path parameter resourceId." }
+        - { name: resourceId, in: path, required: true, schema: { type: string } }
       responses:
         "200":
           description: Result of the check (verified true/false)
@@ -173,47 +130,40 @@ paths:
                 type: object
                 properties:
                   verified: { type: boolean }
-                  expected: { type: string, nullable: true }
-                  found: { type: array, items: { type: string }, nullable: true }
         "404":
           description: No pending DNS verification for this resource
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        "410":
+          description: Verification attempt expired during confirmation
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
 
   /resources/{resourceId}/confirm:
     get:
       summary: Confirm a magic-link verification (public — the token itself is the credential, no Clerk session required)
-      description: "Confirm a magic-link verification (public — the token itself is the credential, no Clerk session required)."
-      operationId: getResourcesResourceidConfirm
-      tags: [Resources]
       security: []
       parameters:
-        - { name: resourceId, in: path, required: true, schema: { type: string }, description: "Path parameter resourceId." }
-        - { name: token, in: query, required: true, schema: { type: string }, description: "Query parameter token." }
+        - { name: resourceId, in: path, required: true, schema: { type: string } }
+        - { name: token, in: query, required: true, schema: { type: string, maxLength: 128 } }
       responses:
         "200":
-          description: The email address was verified platform-wide.
+          description: Verified — resource_grants row created
         "404":
-          description: Invalid or already-used token
+          description: Invalid, expired, or already-used token
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
 
   /admin/resources:
     get:
       summary: List all resources across all users (admin only)
-      description: "List all resources across all users (admin only)."
-      operationId: getAdminResources
-      tags: [Admin]
-      security: [{ clerkSession: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageOffset' }
       responses:
         "200": { description: OK }
 
   /admin/resources/{resourceId}:
     delete:
       summary: Delete a resource and its verifications/grants (admin only)
-      description: "Delete a resource and its verifications/grants (admin only)."
-      operationId: deleteAdminResourcesResourceid
-      tags: [Admin]
-      security: [{ clerkSession: [] }]
       parameters:
-        - { name: resourceId, in: path, required: true, schema: { type: string }, description: "Path parameter resourceId." }
+        - { name: resourceId, in: path, required: true, schema: { type: string } }
       responses:
         "204": { description: No Content }

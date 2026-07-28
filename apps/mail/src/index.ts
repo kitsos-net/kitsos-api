@@ -1,24 +1,61 @@
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
-import { authenticate, checkResourceGrant, checkKeyResourceAccess, checkRateLimit, checkUsageLimitForUser, getUsageLimit, sha256Hex, withRetryAfter } from "@kitsos/auth";
-import { recordError, recordEvent, withTelemetry } from "@kitsos/telemetry";
+import {
+  authenticate,
+  checkResourceGrant,
+  checkScope,
+  constantTimeEqual,
+  consumeDailyLimit,
+  consumeHardDailyLimit,
+  getEffectiveLimit,
+  sha256Hex,
+} from "@kitsos/auth";
+import { withTelemetry } from "@kitsos/telemetry";
 import { resolvePayload } from "./dotpath";
 import { sendViaBrevo } from "./brevo";
 import { getTemplateHtml, invalidateTemplateCache, renderTemplate } from "./template";
+import {
+  isEmail,
+  isEmailList,
+  isNonEmptyString,
+  isStringRecord,
+  normalizeEmail,
+  safeTemplateUrl,
+} from "./validation";
 import type { Env } from "./env";
 
 const APP_ID = "mail";
-const VERIFICATION_FROM_ADDRESS = "noreply@notify.kitsos.net";
-const VERIFICATION_SCOPE = "mail:send:verification";
-const VERIFICATION_TEMPLATE_URL = "https://cdn.kitsos.net/api/mail/templates/verify-email.html";
-const VERIFICATION_TEMPLATE_ID = "system:verify-email";
-
+const MAX_EMAIL_CONTENT_CHARACTERS = 3 * 1024 * 1024;
 type Vars = { userId: string };
-const app = new Hono<{ Bindings: Env; Variables: Vars }>();
+const app = new Hono<{ Bindings: Env; Variables: Vars }>().basePath("/v1");
 
-// Required for Swagger UI and browser clients hosted on a different domain.
+app.use("*", async (c, next) => {
+  if (c.req.url.length > 8192) return c.json({ error: "uri-too-long" }, 414);
+  await next();
+});
+app.use("*", bodyLimit({
+  maxSize: 4 * 1024 * 1024,
+  onError: (c) => c.json({ error: "request-body-too-large" }, 413),
+}));
+app.use("/webhook/*", bodyLimit({
+  maxSize: 256 * 1024,
+  onError: (c) => c.json({ error: "request-body-too-large" }, 413),
+}));
+const metadataBodyLimit = bodyLimit({
+  maxSize: 64 * 1024,
+  onError: (c) => c.json({ error: "request-body-too-large" }, 413),
+});
+app.use("/templates", metadataBodyLimit);
+app.use("/templates/*", metadataBodyLimit);
+app.use("/webhooks", metadataBodyLimit);
+app.use("/webhooks/*", metadataBodyLimit);
 app.use("*", cors({
-  origin: "*",
+  origin: (origin, c) => {
+    const configured = (c.env as Env).CORS_ORIGINS
+      ?? "https://apidev.kitsos.net,https://myaccount.kitsos.net";
+    return configured.split(",").map((item) => item.trim()).includes(origin) ? origin : null;
+  },
   allowHeaders: ["Authorization", "Content-Type", "X-Webhook-Secret"],
   allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
 }));
@@ -27,13 +64,32 @@ function id() {
   return crypto.randomUUID();
 }
 
-function escapeHtml(value: string) {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+function pagination(limitValue?: string, offsetValue?: string) {
+  const limit = Number(limitValue ?? 100);
+  const offset = Number(offsetValue ?? 0);
+  return Number.isInteger(limit) && limit >= 1 && limit <= 500
+    && Number.isInteger(offset) && offset >= 0 && offset <= 100_000
+    ? { limit, offset }
+    : null;
+}
+
+function decodeJsonFields(
+  rows: Record<string, unknown>[],
+  fields: string[]
+): Record<string, unknown>[] {
+  return rows.map((row) => {
+    const decoded = { ...row };
+    for (const field of fields) {
+      if (typeof decoded[field] === "string") {
+        try {
+          decoded[field] = JSON.parse(decoded[field] as string);
+        } catch {
+          decoded[field] = field === "mapping" ? {} : [];
+        }
+      }
+    }
+    return decoded;
+  });
 }
 
 // ============================================================
@@ -41,10 +97,9 @@ function escapeHtml(value: string) {
 // ============================================================
 app.post("/webhook/:webhookId", async (c) => {
   const webhookId = c.req.param("webhookId");
-  const rate = await checkRateLimit(c.env, `mail:webhook:${webhookId}`, { windowSeconds: 60, maxRequests: 30 });
-  if (!rate.allowed) return withRetryAfter(c.json({ error: rate.reason }, 429), rate);
   const providedSecret = c.req.header("X-Webhook-Secret") ?? "";
   if (!providedSecret) return c.json({ error: "missing-secret" }, 401);
+  if (providedSecret.length > 256) return c.json({ error: "invalid-secret" }, 401);
 
   const webhook = await c.env.DB.prepare("SELECT * FROM mail_webhooks WHERE id = ?")
     .bind(webhookId)
@@ -57,135 +112,77 @@ app.post("/webhook/:webhookId", async (c) => {
       mapping: string;
       secret_hash: string;
     }>();
-  if (!webhook) {
-    recordEvent("mail.webhook.deliver", "denied", {
-      "kitsos.resource.id": webhookId,
-      "error.code": "not-found",
-    });
-    return c.json({ error: "not-found" }, 404);
-  }
+  if (!webhook) return c.json({ error: "not-found" }, 404);
 
   const providedHash = await sha256Hex(providedSecret);
-  if (providedHash !== webhook.secret_hash) {
-    recordEvent("mail.webhook.deliver", "denied", {
-      "kitsos.user.id": webhook.user_id,
-      "kitsos.resource.id": webhookId,
-      "error.code": "invalid-secret",
-    });
+  if (!constantTimeEqual(providedHash, webhook.secret_hash)) {
     return c.json({ error: "invalid-secret" }, 401);
   }
 
-  const template = await c.env.DB.prepare("SELECT * FROM mail_templates WHERE id = ?")
-    .bind(webhook.template_id)
+  const grant = await checkResourceGrant(
+    c.env,
+    {
+      method: "api_key",
+      userId: webhook.user_id,
+      appId: APP_ID,
+      scopes: ["mail:send"],
+      groupIds: [],
+    },
+    "email_address",
+    webhook.from_address,
+    "mail:send"
+  );
+  if (!grant.allowed) return c.json({ error: "webhook-disabled" }, 403);
+
+  const template = await c.env.DB.prepare("SELECT * FROM mail_templates WHERE id = ? AND user_id = ?")
+    .bind(webhook.template_id, webhook.user_id)
     .first<{ url: string }>();
   if (!template) return c.json({ error: "template-not-found" }, 500);
 
-  const payload = await c.req.json().catch(() => ({}));
-  const data = resolvePayload(JSON.parse(webhook.mapping), payload);
+  let toAddresses: unknown;
+  let mapping: unknown;
+  try {
+    toAddresses = JSON.parse(webhook.to_addresses);
+    mapping = JSON.parse(webhook.mapping);
+  } catch {
+    return c.json({ error: "invalid-webhook-configuration" }, 500);
+  }
+  if (!isEmailList(toAddresses) || !isStringRecord(mapping, 200, 500)) {
+    return c.json({ error: "invalid-webhook-configuration" }, 500);
+  }
+
+  const payload = await c.req.json().catch(() => null);
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    return c.json({ error: "invalid-json-body" }, 400);
+  }
+  const data = resolvePayload(mapping, payload);
 
   let html: string;
   try {
     html = renderTemplate(await getTemplateHtml(c.env, webhook.template_id, template.url), data);
   } catch (e) {
-    return c.json({ error: "template-fetch-failed", detail: String(e) }, 502);
+    return c.json({ error: "template-fetch-failed" }, 502);
   }
 
   const subject = data.subject || `Notification from ${webhookId}`;
-  const usage = await checkUsageLimitForUser(c.env, webhook.user_id, APP_ID, {
-    limitType: "emails_per_day", cost: JSON.parse(webhook.to_addresses).length,
-  });
-  if (!usage.allowed) return withRetryAfter(c.json({ error: usage.reason }, 429), usage);
+  if (!isNonEmptyString(subject, 998)) {
+    return c.json({ error: "invalid-subject" }, 400);
+  }
+  const emailLimit = await consumeDailyLimit(
+    c.env,
+    webhook.user_id,
+    "emails_per_day",
+    toAddresses.length
+  );
+  if (!emailLimit.allowed) return c.json({ error: "daily-limit-exceeded" }, 429);
   const result = await sendViaBrevo(c.env, {
     from: webhook.from_address,
-    to: JSON.parse(webhook.to_addresses),
+    to: toAddresses,
     subject,
     html,
   });
 
-  if (!result.ok) {
-    recordError("mail.webhook.deliver", "send-failed", "Email provider rejected webhook delivery", {
-      "kitsos.user.id": webhook.user_id,
-      "kitsos.resource.id": webhookId,
-    });
-    return c.json({ error: "send-failed", detail: result.error }, 502);
-  }
-  recordEvent("mail.webhook.deliver", "success", {
-    "kitsos.user.id": webhook.user_id,
-    "kitsos.resource.id": webhookId,
-    "mail.recipient_count": JSON.parse(webhook.to_addresses).length,
-  });
-  return c.json({ sent: true });
-});
-
-// Internal verification delivery. This deliberately cannot send arbitrary
-// content or choose a sender: it is limited to one sender and one message.
-app.post("/internal/verification-email", async (c) => {
-  const auth = await authenticate(
-    c.req.raw,
-    c.env,
-    VERIFICATION_SCOPE,
-    APP_ID,
-    { windowSeconds: 60, maxRequests: 20 }
-  );
-  if (!auth.allowed) return withRetryAfter(c.json({ error: auth.reason }, auth.status as 401 | 403 | 429), auth);
-
-  const body = await c.req.json<{
-    to?: string;
-    confirmUrl?: string;
-    resource?: string;
-  }>().catch(() => null);
-  if (!body?.to || !body.confirmUrl || !body.resource || !body.to.includes("@")) {
-    return c.json({ error: "invalid-request" }, 400);
-  }
-
-  let confirmUrl: URL;
-  try {
-    confirmUrl = new URL(body.confirmUrl);
-  } catch {
-    return c.json({ error: "invalid-confirm-url" }, 400);
-  }
-  if (confirmUrl.protocol !== "https:" || confirmUrl.hostname !== "verify.api.kitsos.net") {
-    return c.json({ error: "invalid-confirm-url" }, 400);
-  }
-
-  const grant = await checkResourceGrant(
-    c.env,
-    auth.context!,
-    "email_address",
-    VERIFICATION_FROM_ADDRESS,
-    VERIFICATION_SCOPE
-  );
-  if (!grant.allowed) return c.json({ error: grant.reason }, grant.status as 403);
-
-  let html: string;
-  try {
-    html = renderTemplate(
-      await getTemplateHtml(c.env, VERIFICATION_TEMPLATE_ID, VERIFICATION_TEMPLATE_URL),
-      { resource: escapeHtml(body.resource), confirm_url: escapeHtml(confirmUrl.toString()) }
-    );
-  } catch (e) {
-    return c.json({ error: "template-fetch-failed", detail: String(e) }, 502);
-  }
-
-  const result = await sendViaBrevo(c.env, {
-    from: VERIFICATION_FROM_ADDRESS,
-    to: [body.to],
-    subject: "Kitsos — Bestätige deine Verifizierung",
-    html,
-    text: `Bestätige die Verifizierung für ${body.resource}: ${confirmUrl}`,
-  });
-  if (!result.ok) {
-    recordError("mail.verification.send", "send-failed", "Email provider rejected verification delivery", {
-      "kitsos.user.id": auth.context!.userId,
-      "kitsos.api_key.id": auth.context!.apiKeyId,
-    });
-    return c.json({ error: "send-failed", detail: result.error }, 502);
-  }
-
-  recordEvent("mail.verification.send", "success", {
-    "kitsos.user.id": auth.context!.userId,
-    "kitsos.api_key.id": auth.context!.apiKeyId,
-  });
+  if (!result.ok) return c.json({ error: "send-failed" }, 502);
   return c.json({ sent: true });
 });
 
@@ -194,7 +191,7 @@ app.post("/internal/verification-email", async (c) => {
 // ============================================================
 app.post("/send", async (c) => {
   const auth = await authenticate(c.req.raw, c.env, "mail:send", APP_ID);
-  if (!auth.allowed) return withRetryAfter(c.json({ error: auth.reason }, auth.status as 401 | 403 | 429), auth);
+  if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
   const ctx = auth.context!;
 
   const body = await c.req.json<{
@@ -205,13 +202,33 @@ app.post("/send", async (c) => {
     data?: Record<string, string>;
     html?: string;
     text?: string;
-  }>();
+  }>().catch(() => null);
+  if (
+    !body
+    || !isEmail(body.from)
+    || !isEmailList(body.to)
+    || !isNonEmptyString(body.subject, 998)
+    || (body.template !== undefined && !isNonEmptyString(body.template, 100))
+    || (body.data !== undefined && !isStringRecord(body.data))
+    || (body.html !== undefined && (
+      typeof body.html !== "string" || body.html.length > MAX_EMAIL_CONTENT_CHARACTERS
+    ))
+    || (body.text !== undefined && (
+      typeof body.text !== "string" || body.text.length > MAX_EMAIL_CONTENT_CHARACTERS
+    ))
+    || (!body.template && !body.html && !body.text)
+  ) {
+    return c.json({ error: "invalid-request-body" }, 400);
+  }
 
-  const grant = await checkResourceGrant(c.env, ctx, "email_address", body.from, "mail:send");
-  if (!grant.allowed) return c.json({ error: grant.reason }, grant.status as 403);
-
-  const usage = await checkUsageLimitForUser(c.env, ctx.userId, APP_ID, { limitType: "emails_per_day", cost: body.to.length });
-  if (!usage.allowed) return withRetryAfter(c.json({ error: usage.reason }, 429), usage);
+  const grant = await checkResourceGrant(
+    c.env,
+    ctx,
+    "email_address",
+    normalizeEmail(body.from),
+    "mail:send"
+  );
+  if (!grant.allowed) return c.json({ error: grant.reason }, 403);
 
   let html = body.html;
   if (body.template) {
@@ -219,27 +236,28 @@ app.post("/send", async (c) => {
       .bind(body.template, ctx.userId)
       .first<{ url: string }>();
     if (!template) return c.json({ error: "template-not-found" }, 404);
-    const access = await checkKeyResourceAccess(c.env, ctx, "mail_template", body.template, "mail:template:read");
-    if (!access.allowed) return c.json({ error: access.reason }, 403);
-    html = renderTemplate(await getTemplateHtml(c.env, body.template, template.url), body.data ?? {});
+    try {
+      html = renderTemplate(await getTemplateHtml(c.env, body.template, template.url), body.data ?? {});
+    } catch {
+      return c.json({ error: "template-fetch-failed" }, 502);
+    }
   }
 
-  const result = await sendViaBrevo(c.env, { from: body.from, to: body.to, subject: body.subject, html, text: body.text });
-  if (!result.ok) {
-    recordError("mail.message.send", "send-failed", "Email provider rejected message delivery", {
-      "kitsos.user.id": ctx.userId,
-      "kitsos.api_key.id": ctx.apiKeyId,
-      "mail.recipient_count": body.to.length,
-      "mail.template.id": body.template,
-    });
-    return c.json({ error: "send-failed", detail: result.error }, 502);
-  }
-  recordEvent("mail.message.send", "success", {
-    "kitsos.user.id": ctx.userId,
-    "kitsos.api_key.id": ctx.apiKeyId,
-    "mail.recipient_count": body.to.length,
-    "mail.template.id": body.template,
+  const emailLimit = await consumeDailyLimit(
+    c.env,
+    ctx.userId,
+    "emails_per_day",
+    body.to.length
+  );
+  if (!emailLimit.allowed) return c.json({ error: "daily-limit-exceeded" }, 429);
+  const result = await sendViaBrevo(c.env, {
+    from: normalizeEmail(body.from),
+    to: body.to.map(normalizeEmail),
+    subject: body.subject,
+    html,
+    text: body.text,
   });
+  if (!result.ok) return c.json({ error: "send-failed" }, 502);
   return c.json({ sent: true });
 });
 
@@ -247,69 +265,113 @@ app.post("/send", async (c) => {
 // Authenticated — /templates
 // ============================================================
 app.get("/templates", async (c) => {
-  const auth = await authenticate(c.req.raw, c.env, "mail:template:read", APP_ID);
-  if (!auth.allowed) return withRetryAfter(c.json({ error: auth.reason }, auth.status as 401 | 403 | 429), auth);
-  const r = await c.env.DB.prepare("SELECT * FROM mail_templates WHERE user_id = ?").bind(auth.context!.userId).all();
-  return c.json(r.results);
+  const auth = await authenticate(c.req.raw, c.env, "mail:manage", APP_ID);
+  if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
+  const page = pagination(c.req.query("limit"), c.req.query("offset"));
+  if (!page) return c.json({ error: "invalid-pagination" }, 400);
+  const r = await c.env.DB.prepare(
+    "SELECT * FROM mail_templates WHERE user_id = ? ORDER BY created_at DESC, id LIMIT ? OFFSET ?"
+  )
+    .bind(auth.context!.userId, page.limit, page.offset)
+    .all();
+  return c.json(decodeJsonFields(r.results, ["variables"]));
 });
 
 app.post("/templates", async (c) => {
-  const auth = await authenticate(c.req.raw, c.env, "mail:template:write", APP_ID);
-  if (!auth.allowed) return withRetryAfter(c.json({ error: auth.reason }, auth.status as 401 | 403 | 429), auth);
-  const body = await c.req.json<{ name: string; url: string; variables: string[] }>();
+  const auth = await authenticate(c.req.raw, c.env, "mail:manage", APP_ID);
+  if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
+  const body = await c.req.json<{ name: string; url: string; variables: string[] }>().catch(() => null);
+  const templateUrl = safeTemplateUrl(body?.url);
+  if (
+    !body
+    || !isNonEmptyString(body.name, 100)
+    || !templateUrl
+    || !Array.isArray(body.variables)
+    || body.variables.length > 100
+    || !body.variables.every((variable) => isNonEmptyString(variable, 100))
+  ) {
+    return c.json({ error: "invalid-request-body" }, 400);
+  }
   const templateId = id();
-  await c.env.DB.prepare("INSERT INTO mail_templates (id, user_id, name, url, variables) VALUES (?, ?, ?, ?, ?)")
-    .bind(templateId, auth.context!.userId, body.name, body.url, JSON.stringify(body.variables))
+  const withinHardCreationLimit = await consumeHardDailyLimit(
+    c.env,
+    auth.context!.userId,
+    APP_ID,
+    "template_creations_per_day",
+    100
+  );
+  if (!withinHardCreationLimit) {
+    return c.json({ error: "template-creation-abuse-limit-exceeded" }, 429);
+  }
+  const templateLimit = await getEffectiveLimit(c.env, auth.context!.userId, "mail_templates");
+  const created = await c.env.DB.prepare(
+    `INSERT INTO mail_templates (id, user_id, name, url, variables)
+     SELECT ?, ?, ?, ?, ?
+     WHERE (
+       SELECT COUNT(*) FROM mail_templates WHERE user_id = ?
+     ) < ?`
+  )
+    .bind(
+      templateId,
+      auth.context!.userId,
+      body.name.trim(),
+      templateUrl,
+      JSON.stringify([...new Set(body.variables)]),
+      auth.context!.userId,
+      templateLimit
+    )
     .run();
-  recordEvent("mail.template.create", "success", {
-    "kitsos.user.id": auth.context!.userId,
-    "kitsos.api_key.id": auth.context!.apiKeyId,
-    "kitsos.resource.id": templateId,
-  });
+  if (created.meta.changes !== 1) {
+    return c.json({ error: "template-limit-exceeded", limit: templateLimit }, 429);
+  }
   return c.json({ id: templateId }, 201);
 });
 
 app.patch("/templates/:templateId", async (c) => {
-  const auth = await authenticate(c.req.raw, c.env, "mail:template:write", APP_ID);
-  if (!auth.allowed) return withRetryAfter(c.json({ error: auth.reason }, auth.status as 401 | 403 | 429), auth);
+  const auth = await authenticate(c.req.raw, c.env, "mail:manage", APP_ID);
+  if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
   const templateId = c.req.param("templateId");
-  const access = await checkKeyResourceAccess(c.env, auth.context!, "mail_template", templateId, "mail:template:write");
-  if (!access.allowed) return c.json({ error: access.reason }, 403);
-  const body = await c.req.json<{ url?: string; variables?: string[] }>();
+  const body = await c.req.json<{ url?: string; variables?: string[] }>().catch(() => null);
+  if (!body) return c.json({ error: "invalid-json-body" }, 400);
+  const templateUrl = body.url === undefined ? undefined : safeTemplateUrl(body.url);
+  if (
+    (body.url !== undefined && !templateUrl)
+    || (body.variables !== undefined && (
+      !Array.isArray(body.variables)
+      || body.variables.length > 100
+      || !body.variables.every((variable) => isNonEmptyString(variable, 100))
+    ))
+  ) {
+    return c.json({ error: "invalid-request-body" }, 400);
+  }
 
-  if (body.url) {
+  if (templateUrl) {
     await c.env.DB.prepare("UPDATE mail_templates SET url = ? WHERE id = ? AND user_id = ?")
-      .bind(body.url, templateId, auth.context!.userId)
+      .bind(templateUrl, templateId, auth.context!.userId)
       .run();
     await invalidateTemplateCache(c.env, templateId);
   }
   if (body.variables) {
     await c.env.DB.prepare("UPDATE mail_templates SET variables = ? WHERE id = ? AND user_id = ?")
-      .bind(JSON.stringify(body.variables), templateId, auth.context!.userId)
+      .bind(JSON.stringify([...new Set(body.variables)]), templateId, auth.context!.userId)
       .run();
   }
-  recordEvent("mail.template.update", "success", {
-    "kitsos.user.id": auth.context!.userId,
-    "kitsos.api_key.id": auth.context!.apiKeyId,
-    "kitsos.resource.id": templateId,
-  });
   return c.body(null, 204);
 });
 
 app.delete("/templates/:templateId", async (c) => {
-  const auth = await authenticate(c.req.raw, c.env, "mail:template:delete", APP_ID);
-  if (!auth.allowed) return withRetryAfter(c.json({ error: auth.reason }, auth.status as 401 | 403 | 429), auth);
-  const access = await checkKeyResourceAccess(c.env, auth.context!, "mail_template", c.req.param("templateId"), "mail:template:delete");
-  if (!access.allowed) return c.json({ error: access.reason }, 403);
+  const auth = await authenticate(c.req.raw, c.env, "mail:manage", APP_ID);
+  if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
+  const webhook = await c.env.DB.prepare(
+    "SELECT 1 FROM mail_webhooks WHERE template_id = ? AND user_id = ? LIMIT 1"
+  )
+    .bind(c.req.param("templateId"), auth.context!.userId)
+    .first();
+  if (webhook) return c.json({ error: "template-in-use" }, 409);
   await c.env.DB.prepare("DELETE FROM mail_templates WHERE id = ? AND user_id = ?")
     .bind(c.req.param("templateId"), auth.context!.userId)
     .run();
   await invalidateTemplateCache(c.env, c.req.param("templateId"));
-  recordEvent("mail.template.delete", "success", {
-    "kitsos.user.id": auth.context!.userId,
-    "kitsos.api_key.id": auth.context!.apiKeyId,
-    "kitsos.resource.id": c.req.param("templateId"),
-  });
   return c.body(null, 204);
 });
 
@@ -317,19 +379,24 @@ app.delete("/templates/:templateId", async (c) => {
 // Authenticated — /webhooks
 // ============================================================
 app.get("/webhooks", async (c) => {
-  const auth = await authenticate(c.req.raw, c.env, "mail:webhook:read", APP_ID);
-  if (!auth.allowed) return withRetryAfter(c.json({ error: auth.reason }, auth.status as 401 | 403 | 429), auth);
+  const auth = await authenticate(c.req.raw, c.env, "mail:manage", APP_ID);
+  if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
+  const page = pagination(c.req.query("limit"), c.req.query("offset"));
+  if (!page) return c.json({ error: "invalid-pagination" }, 400);
   const r = await c.env.DB
-    .prepare("SELECT id, name, template_id, from_address, to_addresses, mapping, created_at FROM mail_webhooks WHERE user_id = ?")
-    .bind(auth.context!.userId)
+    .prepare("SELECT id, name, template_id, from_address, to_addresses, mapping, created_at FROM mail_webhooks WHERE user_id = ? ORDER BY created_at DESC, id LIMIT ? OFFSET ?")
+    .bind(auth.context!.userId, page.limit, page.offset)
     .all();
-  return c.json(r.results); // secret_hash never returned
+  return c.json(decodeJsonFields(r.results, ["to_addresses", "mapping"])); // secret_hash never returned
 });
 
 app.post("/webhooks", async (c) => {
-  const auth = await authenticate(c.req.raw, c.env, "mail:webhook:write", APP_ID);
-  if (!auth.allowed) return withRetryAfter(c.json({ error: auth.reason }, auth.status as 401 | 403 | 429), auth);
+  const auth = await authenticate(c.req.raw, c.env, "mail:manage", APP_ID);
+  if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
   const ctx = auth.context!;
+  if (!checkScope(ctx, "mail:send").allowed) {
+    return c.json({ error: "scope-missing" }, 403);
+  }
 
   const body = await c.req.json<{
     name: string;
@@ -337,55 +404,128 @@ app.post("/webhooks", async (c) => {
     fromAddress: string;
     toAddresses: string[];
     mapping: Record<string, string>;
-  }>();
-
-  const grant = await checkResourceGrant(c.env, ctx, "email_address", body.fromAddress, "mail:send");
-  if (!grant.allowed) return c.json({ error: grant.reason }, grant.status as 403);
-
-  const maxWebhooks = await getUsageLimit(c.env, ctx.userId, APP_ID, "webhooks");
-  const countRow = await c.env.DB.prepare("SELECT COUNT(*) as n FROM mail_webhooks WHERE user_id = ?")
-    .bind(ctx.userId)
-    .first<{ n: number }>();
-  if (maxWebhooks !== null && (countRow?.n ?? 0) >= maxWebhooks) {
-    return c.json({ error: "webhook-limit-exceeded" }, 403);
+  }>().catch(() => null);
+  if (
+    !body
+    || !isNonEmptyString(body.name, 100)
+    || !isNonEmptyString(body.templateId, 100)
+    || !isEmail(body.fromAddress)
+    || !isEmailList(body.toAddresses)
+    || !isStringRecord(body.mapping, 200, 500)
+  ) {
+    return c.json({ error: "invalid-request-body" }, 400);
   }
 
+  const template = await c.env.DB.prepare(
+    "SELECT 1 FROM mail_templates WHERE id = ? AND user_id = ?"
+  )
+    .bind(body.templateId, ctx.userId)
+    .first();
+  if (!template) return c.json({ error: "template-not-found" }, 404);
+
+  const fromAddress = normalizeEmail(body.fromAddress);
+  const toAddresses = body.toAddresses.map(normalizeEmail);
+  const grant = await checkResourceGrant(c.env, ctx, "email_address", fromAddress, "mail:send");
+  if (!grant.allowed) return c.json({ error: grant.reason }, 403);
+
   const webhookId = id();
+  const withinHardCreationLimit = await consumeHardDailyLimit(
+    c.env,
+    ctx.userId,
+    APP_ID,
+    "webhook_creations_per_day",
+    100
+  );
+  if (!withinHardCreationLimit) {
+    return c.json({ error: "webhook-creation-abuse-limit-exceeded" }, 429);
+  }
   const secret = crypto.randomUUID().replace(/-/g, "");
   const secretHash = await sha256Hex(secret);
 
-  await c.env.DB.prepare(
-    `INSERT INTO mail_webhooks (id, user_id, name, secret_hash, template_id, from_address, to_addresses, mapping)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  const webhookLimit = await getEffectiveLimit(c.env, ctx.userId, "mail_webhooks");
+  const created = await c.env.DB.prepare(
+    `INSERT INTO mail_webhooks
+       (id, user_id, name, secret_hash, template_id, from_address, to_addresses, mapping)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?
+     WHERE (
+       SELECT COUNT(*) FROM mail_webhooks WHERE user_id = ?
+     ) < ?`
   )
-    .bind(webhookId, ctx.userId, body.name, secretHash, body.templateId, body.fromAddress, JSON.stringify(body.toAddresses), JSON.stringify(body.mapping))
+    .bind(
+      webhookId,
+      ctx.userId,
+      body.name,
+      secretHash,
+      body.templateId,
+      fromAddress,
+      JSON.stringify(toAddresses),
+      JSON.stringify(body.mapping),
+      ctx.userId,
+      webhookLimit
+    )
     .run();
+  if (created.meta.changes !== 1) {
+    return c.json({ error: "webhook-limit-exceeded", limit: webhookLimit }, 429);
+  }
 
-  recordEvent("mail.webhook.create", "success", {
-    "kitsos.user.id": ctx.userId,
-    "kitsos.api_key.id": ctx.apiKeyId,
-    "kitsos.resource.id": webhookId,
-  });
   // secret shown only here — not recoverable afterwards
-  return c.json({ id: webhookId, secret, url: `https://mail.api.kitsos.net/webhook/${webhookId}` }, 201);
+  return c.json({ id: webhookId, secret, url: `https://mail.api.kitsos.net/v1/webhook/${webhookId}` }, 201);
 });
 
 app.patch("/webhooks/:webhookId", async (c) => {
-  const auth = await authenticate(c.req.raw, c.env, "mail:webhook:write", APP_ID);
-  if (!auth.allowed) return withRetryAfter(c.json({ error: auth.reason }, auth.status as 401 | 403 | 429), auth);
+  const auth = await authenticate(c.req.raw, c.env, "mail:manage", APP_ID);
+  if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
+  if (!checkScope(auth.context!, "mail:send").allowed) {
+    return c.json({ error: "scope-missing" }, 403);
+  }
   const webhookId = c.req.param("webhookId");
   const body = await c.req.json<{
     templateId?: string;
     fromAddress?: string;
     toAddresses?: string[];
     mapping?: Record<string, string>;
-  }>();
+  }>().catch(() => null);
+  if (!body) return c.json({ error: "invalid-json-body" }, 400);
+
+  const existing = await c.env.DB.prepare(
+    "SELECT 1 FROM mail_webhooks WHERE id = ? AND user_id = ?"
+  )
+    .bind(webhookId, auth.context!.userId)
+    .first();
+  if (!existing) return c.json({ error: "not-found" }, 404);
+
+  if (body.templateId !== undefined) {
+    if (!isNonEmptyString(body.templateId, 100)) return c.json({ error: "invalid-template-id" }, 400);
+    const template = await c.env.DB.prepare(
+      "SELECT 1 FROM mail_templates WHERE id = ? AND user_id = ?"
+    )
+      .bind(body.templateId, auth.context!.userId)
+      .first();
+    if (!template) return c.json({ error: "template-not-found" }, 404);
+  }
+  if (body.fromAddress !== undefined) {
+    if (!isEmail(body.fromAddress)) return c.json({ error: "invalid-from-address" }, 400);
+    const grant = await checkResourceGrant(
+      c.env,
+      auth.context!,
+      "email_address",
+      normalizeEmail(body.fromAddress),
+      "mail:send"
+    );
+    if (!grant.allowed) return c.json({ error: grant.reason }, 403);
+  }
+  if (body.toAddresses !== undefined && !isEmailList(body.toAddresses)) {
+    return c.json({ error: "invalid-to-addresses" }, 400);
+  }
+  if (body.mapping !== undefined && !isStringRecord(body.mapping, 200, 500)) {
+    return c.json({ error: "invalid-mapping" }, 400);
+  }
 
   const updates: string[] = [];
   const values: unknown[] = [];
   if (body.templateId) { updates.push("template_id = ?"); values.push(body.templateId); }
-  if (body.fromAddress) { updates.push("from_address = ?"); values.push(body.fromAddress); }
-  if (body.toAddresses) { updates.push("to_addresses = ?"); values.push(JSON.stringify(body.toAddresses)); }
+  if (body.fromAddress) { updates.push("from_address = ?"); values.push(normalizeEmail(body.fromAddress)); }
+  if (body.toAddresses) { updates.push("to_addresses = ?"); values.push(JSON.stringify(body.toAddresses.map(normalizeEmail))); }
   if (body.mapping) { updates.push("mapping = ?"); values.push(JSON.stringify(body.mapping)); }
   if (updates.length === 0) return c.body(null, 204);
 
@@ -393,29 +533,20 @@ app.patch("/webhooks/:webhookId", async (c) => {
   await c.env.DB.prepare(`UPDATE mail_webhooks SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`)
     .bind(...values)
     .run();
-  recordEvent("mail.webhook.update", "success", {
-    "kitsos.user.id": auth.context!.userId,
-    "kitsos.api_key.id": auth.context!.apiKeyId,
-    "kitsos.resource.id": webhookId,
-  });
   return c.body(null, 204);
 });
 
 app.delete("/webhooks/:webhookId", async (c) => {
-  const auth = await authenticate(c.req.raw, c.env, "mail:webhook:delete", APP_ID);
-  if (!auth.allowed) return withRetryAfter(c.json({ error: auth.reason }, auth.status as 401 | 403 | 429), auth);
-  const webhookId = c.req.param("webhookId");
+  const auth = await authenticate(c.req.raw, c.env, "mail:manage", APP_ID);
+  if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
   await c.env.DB.prepare("DELETE FROM mail_webhooks WHERE id = ? AND user_id = ?")
-    .bind(webhookId, auth.context!.userId)
+    .bind(c.req.param("webhookId"), auth.context!.userId)
     .run();
-  recordEvent("mail.webhook.delete", "success", {
-    "kitsos.user.id": auth.context!.userId,
-    "kitsos.api_key.id": auth.context!.apiKeyId,
-    "kitsos.resource.id": webhookId,
-  });
   return c.body(null, 204);
 });
 
 app.get("/health", (c) => c.json({ ok: true }));
+app.notFound((c) => c.json({ error: "not-found" }, 404));
+app.onError((_error, c) => c.json({ error: "internal-error" }, 500));
 
 export default withTelemetry(app, "mail");

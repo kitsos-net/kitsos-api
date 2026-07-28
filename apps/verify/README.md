@@ -1,52 +1,39 @@
 # verify
 
-`verify.api.kitsos.net` verifies ownership once for the whole Kitsos API
-platform. API-key scopes control operations; verified resources do not
-have app-specific scopes.
+`verify.api.kitsos.net/v1` — resource ownership verification (DNS-TXT or
+magic-link), the gate before any `resource_grants` row gets created.
+`dns-manager`, `hide-my-email`, etc. all check grants via
+`@kitsos/auth`'s `checkResourceGrant()` against what this worker
+produces.
 
 ## Flow
 
 **DNS-TXT** (e.g. verifying you own `domain.de`):
 
-1. `POST /resources` with `{resourceType: "zone", value: "domain.de"}`
+1. `POST /resources` with `{appId, resourceType: "zone", value: "domain.de", method: "dns_txt", scopes: [...]}`
    → returns the TXT record name + value to add
 2. Add `_kitsos-verify.domain.de TXT "kitsos-verify=<token>"` at your DNS provider
 3. `POST /resources/:id/check-dns` → polls via Cloudflare DoH, marks
-   verified platform-wide if the token matches
-4. A daily scheduled check confirms that the TXT token is still present.
-   If it was deliberately removed, the domain becomes unverified globally.
-   Resolver or network failures do not revoke a verified domain.
+   verified + creates the `resource_grants` row if the token matches
+4. Re-verification due after 30 days, 7-day grace period after that
+   before the grant is treated as expired (checked by
+   `@kitsos/auth`'s `checkResourceGrant`, not enforced here)
 
 **Magic link** (e.g. verifying an email address):
 
-1. `POST /resources` with `{resourceType: "email_address", value: "you@example.com"}`.
-   The worker always sends the confirmation link to that exact address.
+1. `POST /resources` with `resourceType: "email_address"` and
+   `method: "magic_link"` → sends an email via mail.api.kitsos.net to
+   exactly the address supplied in `value`
 2. User clicks it → `GET /resources/:id/confirm?token=...` (public,
    no auth — the token itself is the credential) → marks verified +
-   makes the address available to every Kitsos API
-3. Ownership remains verified until the resource is explicitly removed.
-4. Delivery is limited to 15 emails per UTC day by default. Users can request
-   a higher `verification_emails_per_day` limit through the Keys API's
-   `/me/limit-increase-requests` endpoint; it takes effect after approval.
+   creates the grant
+3. Re-verification due after 90 days, 14-day grace period
 
-## Resource lifecycle
-
-- A user has at most one verification attempt and one grant per resource.
-  Starting another pending attempt replaces its token instead of creating a
-  duplicate.
-- `DELETE /resources/:id` removes the caller's verified ownership claim and
-  associated grant. It requires `verify:resource:delete`; claims owned by
-  other users are left untouched.
-- The magic-link email source is
-  `web/cdn/api/mail/templates/verify-email.html`, published as
-  `https://cdn.kitsos.net/api/mail/templates/verify-email.html`. The internal
-  Mail endpoint fetches it with the `resource` and `confirm_url` variables.
+Magic-link tokens are stored only as SHA-256 hashes and expire after
+30 minutes. DNS challenges expire after 24 hours.
 
 ## Known gaps
 
-- `mail.ts`'s call to `mail.api.kitsos.net/send` is a **best-guess
-  contract** — mail.api.kitsos.net's actual OpenAPI spec doesn't exist
-  yet (see [[kitsos-mail-api]]), confirm the real payload shape before
-  relying on this in production
-- Magic-link delivery has a daily budget, but DNS verification creation and
-  lookup requests do not yet have a short-window request-rate limit
+- No cron job yet to warn users before `reverify_due_at` /
+  auto-expire grants past `grace_expires_at` — that's the planned
+  `cron` worker's job
