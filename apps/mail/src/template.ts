@@ -37,7 +37,7 @@ async function readBoundedBody(res: Response, maximumBytes: number): Promise<Uin
  */
 export async function getTemplateHtml(env: Env, templateId: string, url: string): Promise<string> {
   const cacheKey = `tpl:${templateId}`;
-  const cached = await env.AUTH_CACHE.get(cacheKey);
+  const cached = await env.AUTH_CACHE.get(cacheKey).catch(() => null);
   if (cached) return cached;
 
   const res = await fetch(url, {
@@ -52,12 +52,19 @@ export async function getTemplateHtml(env: Env, templateId: string, url: string)
   const body = await readBoundedBody(res, MAX_TEMPLATE_BYTES);
   const html = new TextDecoder().decode(body);
 
-  await env.AUTH_CACHE.put(cacheKey, html, { expirationTtl: TEMPLATE_CACHE_TTL_SECONDS });
+  // Template delivery must not fail merely because the optional KV cache has
+  // exhausted its daily write budget. The bounded HTTPS source remains the
+  // authoritative fallback.
+  await env.AUTH_CACHE.put(
+    cacheKey,
+    html,
+    { expirationTtl: TEMPLATE_CACHE_TTL_SECONDS },
+  ).catch(() => {});
   return html;
 }
 
 export async function invalidateTemplateCache(env: Env, templateId: string): Promise<void> {
-  await env.AUTH_CACHE.delete(`tpl:${templateId}`);
+  await env.AUTH_CACHE.delete(`tpl:${templateId}`).catch(() => {});
 }
 
 /** Renders `{{ variableName }}` placeholders — same syntax as Certimate itself. */
