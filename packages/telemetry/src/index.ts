@@ -233,7 +233,10 @@ export function withTelemetry<Env extends TelemetryEnv>(
         spans: Parameters<OTLPExporter["export"]>[0],
         callback: Parameters<OTLPExporter["export"]>[1]
       ) {
-        exporter.export(spans, (result) => {
+        // otel-cf-workers rc.52 accepts a postProcessor option but does not
+        // invoke it in its export path. Sanitize again at the final exporter
+        // boundary so sensitive URL/header attributes cannot leave the Worker.
+        exporter.export(stripSensitiveSpanAttributes(spans), (result) => {
           if (result.error) {
             console.error(JSON.stringify({
               event: "telemetry.export.failed",
@@ -249,6 +252,9 @@ export function withTelemetry<Env extends TelemetryEnv>(
     return {
       exporter: reportingExporter,
       service: { name: serviceName },
+      // Retain this for forward compatibility if the library restores its
+      // documented post-processor hook. The exporter boundary above remains
+      // the authoritative privacy guard.
       postProcessor: stripSensitiveSpanAttributes,
       // Request statistics must be exact rather than extrapolated from a sample.
       sampling: { headSampler: { ratio: 1 } },
