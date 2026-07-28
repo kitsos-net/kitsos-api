@@ -298,7 +298,13 @@ export async function checkRateLimit(
   const count = current ? parseInt(current, 10) : 0;
 
   if (count >= options.maxRequests) {
-    return { allowed: false, status: 429, reason: "rate-limit-exceeded" };
+    const elapsed = Math.floor(Date.now() / 1000) % options.windowSeconds;
+    return {
+      allowed: false,
+      status: 429,
+      reason: "rate-limit-exceeded",
+      retryAfterSeconds: Math.max(1, options.windowSeconds - elapsed),
+    };
   }
 
   await env.USAGE_COUNTERS.put(kvKey, String(count + 1), {

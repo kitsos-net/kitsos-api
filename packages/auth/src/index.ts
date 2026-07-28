@@ -36,6 +36,13 @@ export {
   invalidateUserApiKeyCaches,
 };
 
+export function withRetryAfter(response: Response, result: CheckResult): Response {
+  if (result.retryAfterSeconds) {
+    response.headers.set("Retry-After", String(result.retryAfterSeconds));
+  }
+  return response;
+}
+
 const DEFAULT_RATE_LIMIT: RateLimitOptions = { windowSeconds: 60, maxRequests: 60 };
 
 /**

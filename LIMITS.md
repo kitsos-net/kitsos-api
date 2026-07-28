@@ -54,6 +54,9 @@ user, are permitted.
 | API key name / description | 100 / 2,000 characters |
 | API key scopes | 100 scopes, each at most 100 characters |
 | Pagination | 500 rows/request, maximum offset 100,000 |
+| Utility request URI | 8,192 characters |
+| Utility hash input | 16,384 characters |
+| Utility DNS upstream response | 64 KiB, 5-second timeout, 100 records per section |
 
 Creation churn is additionally capped at 100 API keys, 100 templates,
 100 webhooks, 500 HME aliases, and 10 limit-increase requests per user per UTC

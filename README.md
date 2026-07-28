@@ -22,13 +22,11 @@ criteria for introducing `/v2`.
 
 See `packages/auth/README.md` for the auth model. The database schema is
 defined by the ordered migrations `packages/auth/0001_init.sql` through
-`packages/auth/0007_product_limits.sql`.
+`packages/auth/0008_utility_api.sql`.
 
-Before deploying this revision, apply migrations
-`0006_security_hardening.sql` and `0007_product_limits.sql` to D1 in order.
-Migration 0006 invalidates pending legacy plaintext verification tokens; users
-with an unfinished attempt must start it again. Migration 0007 adds the atomic
-daily product counters and migrates legacy mail limit overrides.
+Migration 0006 invalidates pending legacy plaintext verification tokens;
+migration 0007 adds atomic product counters and retention; migration 0008
+registers the Utility API and its scopes.
 
 See [`LIMITS.md`](./LIMITS.md) for hard abuse caps, adjustable product limits,
 and the proposed Cloudflare edge rule.
