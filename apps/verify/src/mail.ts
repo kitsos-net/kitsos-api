@@ -1,6 +1,16 @@
 import type { Env } from "./env";
 
 const DEFAULT_FROM_ADDRESS = "verify@kitsos.net";
+const VERIFICATION_TEMPLATE_ID = "resource-verification";
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
 /**
  * Sends the magic-link verification email via mail.api.kitsos.net,
@@ -26,10 +36,13 @@ export async function sendMagicLinkEmail(
         from: env.MAIL_FROM_ADDRESS || DEFAULT_FROM_ADDRESS,
         to: [to],
         subject: "Kitsos — Bestätige deine Verifizierung",
-        template: "resource-verification",
+        template: VERIFICATION_TEMPLATE_ID,
         data: {
-          resource: resourceValue,
-          confirm_url: confirmUrl,
+          // magicLink keeps the previously published CDN template functional
+          // while confirm_url is the canonical variable used by the v1 design.
+          magicLink: escapeHtml(confirmUrl),
+          resource: escapeHtml(resourceValue),
+          confirm_url: escapeHtml(confirmUrl),
         },
       }),
     });

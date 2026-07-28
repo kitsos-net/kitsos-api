@@ -23,6 +23,6 @@ id = "4823ab0d3fd6452e8437631a3717f2b5"
 #   CLERK_SECRET_KEY
 #   CLERK_PUBLISHABLE_KEY
 #   ADMIN_GROUP_ID
-#   MAIL_API_KEY       (kitsos_... key for mail.api.kitsos.net, scope mail:send)
+#   MAIL_API_KEY       (key owned by system:verify-mailer, app mail, scope mail:send)
 #   AXIOM_TOKEN
 #   AXIOM_DATASET
