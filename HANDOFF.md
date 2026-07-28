@@ -140,7 +140,7 @@ produktiv genutzt.
      mit echter HTML-URL)
    - `kitsos_...` API-Key mit Scope `mail:send` für App `mail` erstellen
      (`keys-api` `/admin/api-keys`)
-   - Resource Grant für die Absenderadresse (Default `verify@kitsos.net`,
+   - Resource Grant für die Absenderadresse (Default `verify@notify.kitsos.net`,
      überschreibbar via `MAIL_FROM_ADDRESS` Secret in `verify`) — läuft über
      `verify.api.kitsos.net` selbst
    - Den Key als `MAIL_API_KEY` Secret in `verify` setzen

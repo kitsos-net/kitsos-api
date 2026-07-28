@@ -1,6 +1,6 @@
 import type { Env } from "./env";
 
-const DEFAULT_FROM_ADDRESS = "verify@kitsos.net";
+const DEFAULT_FROM_ADDRESS = "verify@notify.kitsos.net";
 const VERIFICATION_TEMPLATE_ID = "resource-verification";
 
 function escapeHtml(value: string): string {
