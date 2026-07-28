@@ -22,7 +22,7 @@ type RequestOutcome =
   | "server_error";
 
 const AXIOM_EU_TRACES_URL = "https://eu-central-1.aws.edge.axiom.co/v1/traces";
-const TELEMETRY_SCHEMA_VERSION = 2;
+const TELEMETRY_SCHEMA_VERSION = 3;
 
 function safePath(pathname: string): string {
   return pathname
@@ -60,27 +60,17 @@ function classifyStatus(status: number): { outcome: RequestOutcome; reason: stri
 
 function requestAttributes(
   request: Request,
-  serviceName: string,
-  status: number,
-  durationMs: number
+  status: number
 ): Attributes {
   const url = new URL(request.url);
   const classification = classifyStatus(status);
   const cf = request.cf as IncomingRequestCfProperties | undefined;
 
   return {
-    "event.name": "request.completed",
-    "event.category": "http",
-    "event.outcome": classification.outcome,
-    "event.reason": classification.reason,
     "kitsos.telemetry.schema_version": TELEMETRY_SCHEMA_VERSION,
-    "kitsos.api.name": serviceName,
-    "kitsos.request.method": request.method,
-    "kitsos.request.path": safePath(url.pathname),
-    "kitsos.request.status_code": status,
+    "url.path": safePath(url.pathname),
     "kitsos.request.outcome": classification.outcome,
     "kitsos.request.reason": classification.reason,
-    "kitsos.request.duration_ms": durationMs,
     "cloudflare.ray_id": request.headers.get("CF-Ray") ?? "",
     "cloudflare.colo": cf?.colo ?? "",
     "client.country": cf?.country ?? "",
@@ -92,17 +82,82 @@ function stripSensitiveSpanAttributes(spans: Parameters<OTLPExporter["export"]>[
   for (const span of spans) {
     const attributes = span.attributes as Record<string, unknown>;
     attributes["kitsos.telemetry.schema_version"] = TELEMETRY_SCHEMA_VERSION;
-    delete attributes["url.full"];
-    delete attributes["url.query"];
-    delete attributes["http.url"];
-    delete attributes["http.target"];
-    delete attributes["http.request.header.authorization"];
-    delete attributes["http.request.header.cookie"];
-    delete attributes["http.response.header.set-cookie"];
+    const path = attributes["url.path"];
+    if (typeof path === "string") {
+      attributes["url.path"] = safePath(path);
+    }
 
-    const sanitizedPath = attributes["kitsos.request.path"];
-    if (typeof sanitizedPath === "string") {
-      attributes["url.path"] = sanitizedPath;
+    for (const key of [
+      // Sensitive or high-cardinality request data.
+      "url.full",
+      "url.query",
+      "http.url",
+      "http.target",
+      "http.request.header.authorization",
+      "http.request.header.cookie",
+      "http.response.header.set-cookie",
+      "user_agent.original",
+      // Duplicates of standard OTel request fields.
+      "kitsos.api.name",
+      "kitsos.app.id",
+      "kitsos.request.method",
+      "kitsos.request.path",
+      "kitsos.request.status_code",
+      "kitsos.request.duration_ms",
+      // Semantic events live only in the span's events array.
+      "event.name",
+      "event.category",
+      "event.outcome",
+      "event.reason",
+      "kitsos.event.name",
+      "kitsos.event.outcome",
+      "kitsos.event.reason",
+      "error.code",
+      "error.message",
+      "kitsos.resource.id",
+      "kitsos.resource.type",
+      "limit.type",
+      "limit.value",
+      "limit.bucket",
+      "limit.retry_after_seconds",
+      "usage.current",
+      "usage.cost",
+      "usage.next",
+      // Low-value transport metadata and duplicate Cloudflare dimensions.
+      "http.accepts",
+      "http.mime_type",
+      "http.request.body.size",
+      "messaging.destination.name",
+      "rpc.message.id",
+      "network.protocol.name",
+      "network.protocol.version",
+      "url.scheme",
+      "server.address",
+      "faas.invocation_id",
+      "faas.trigger",
+      "net.asn",
+      "net.colo",
+      "net.country",
+      "net.request_priority",
+      "net.tcp_rtt",
+      "net.tls_cipher",
+      "net.tls_version",
+    ]) {
+      delete attributes[key];
+    }
+
+    if (span.status) {
+      span.status.message = undefined;
+    }
+
+    const resourceAttributes = (span.resource as unknown as {
+      attributes?: Record<string, unknown>;
+    }).attributes;
+    if (resourceAttributes) {
+      delete resourceAttributes["cloud.platform"];
+      delete resourceAttributes["cloud.provider"];
+      delete resourceAttributes["cloud.region"];
+      delete resourceAttributes["faas.max_memory"];
     }
   }
   return spans;
@@ -120,23 +175,17 @@ export function recordEvent(
   const span = trace.getActiveSpan();
   if (!span) return;
   const attributes: Attributes = {
-    "event.name": name,
     "event.category": name.split(".", 1)[0] || "application",
     "event.outcome": outcome,
     "kitsos.telemetry.schema_version": TELEMETRY_SCHEMA_VERSION,
+    ...(typeof fields["error.code"] === "string"
+      ? { "event.reason": fields["error.code"] }
+      : {}),
   };
   for (const [key, value] of Object.entries(fields)) {
-    if (value !== undefined) attributes[key] = value;
+    if (value !== undefined && key !== "error.code") attributes[key] = value;
   }
   span.addEvent(name, attributes);
-  span.setAttributes({
-    "kitsos.event.name": name,
-    "kitsos.event.outcome": outcome,
-    ...(typeof fields["error.code"] === "string"
-      ? { "kitsos.event.reason": fields["error.code"] }
-      : {}),
-    ...attributes,
-  });
 }
 
 export function recordError(
@@ -151,7 +200,7 @@ export function recordError(
     "error.code": errorCode,
     "error.message": message,
   });
-  span?.setStatus({ code: SpanStatusCode.ERROR, message: errorCode });
+  span?.setStatus({ code: SpanStatusCode.ERROR });
 }
 
 /**
@@ -160,9 +209,8 @@ export function recordError(
  * traces to Axiom via OTLP/HTTP. Requires `AXIOM_TOKEN` / `AXIOM_DATASET`
  * secrets and `compatibility_flags = ["nodejs_compat"]` in wrangler.toml.
  *
- * Every fetch request gets a request.completed event and stable request
- * dimensions. Query strings, full URLs, credentials and cookie attributes are
- * removed before export.
+ * Every fetch request gets stable request dimensions. Query strings, full
+ * URLs, credentials and cookie attributes are removed before export.
  *
  * Usage in an app's index.ts:
  *
@@ -177,14 +225,20 @@ export function withTelemetry<Env extends TelemetryEnv>(
     ? {
         ...handler,
         async fetch(request, env, ctx) {
-          const startedAt = Date.now();
           const span = trace.getActiveSpan();
           const sanitizedPath = safePath(new URL(request.url).pathname);
+          const authorization = request.headers.get("Authorization") ?? "";
+          const presentedToken = authorization.replace(/^Bearer\s+/i, "");
+          const apiKeyUsed = presentedToken.startsWith("kitsos_");
           span?.setAttributes({
             "kitsos.telemetry.schema_version": TELEMETRY_SCHEMA_VERSION,
-            "kitsos.api.name": serviceName,
-            "kitsos.request.method": request.method,
-            "kitsos.request.path": sanitizedPath,
+            "url.path": sanitizedPath,
+            "kitsos.api_key.used": apiKeyUsed,
+            "kitsos.auth.method": apiKeyUsed
+              ? "api_key"
+              : authorization
+                ? "bearer"
+                : "anonymous",
             "cloudflare.ray_id": request.headers.get("CF-Ray") ?? "",
           });
 
@@ -192,28 +246,21 @@ export function withTelemetry<Env extends TelemetryEnv>(
             const response = await originalFetch.call(handler, request, env, ctx);
             const attributes = requestAttributes(
               request,
-              serviceName,
-              response.status,
-              Date.now() - startedAt
+              response.status
             );
-            span?.addEvent("request.completed", attributes);
             span?.setAttributes(attributes);
             if (response.status >= 500) {
-              span?.setStatus({ code: SpanStatusCode.ERROR, message: "server-error" });
+              span?.setStatus({ code: SpanStatusCode.ERROR });
             }
             return response;
           } catch (error) {
             const attributes = requestAttributes(
               request,
-              serviceName,
-              500,
-              Date.now() - startedAt
+              500
             );
-            attributes["event.reason"] = "unhandled-exception";
             attributes["kitsos.request.reason"] = "unhandled-exception";
-            span?.addEvent("request.completed", attributes);
             span?.setAttributes(attributes);
-            span?.setStatus({ code: SpanStatusCode.ERROR, message: "unhandled-exception" });
+            span?.setStatus({ code: SpanStatusCode.ERROR });
             throw error;
           }
         },

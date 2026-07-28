@@ -2,47 +2,47 @@
 
 Every HTTP request, including unauthenticated, rejected, rate-limited and
 not-found requests, produces one fully sampled OpenTelemetry server span in
-Axiom EU through `https://eu-central-1.aws.edge.axiom.co`. Every request also
-adds a `request.completed` event. The dataset is configured through
+Axiom EU through `https://eu-central-1.aws.edge.axiom.co`. Request completion
+is represented by the root span; only meaningful application and decision
+events are added to its `events` array. The dataset is configured through
 `AXIOM_DATASET` and should be `api-logs`.
 
 | Axiom field | Meaning |
 | --- | --- |
 | `service.name` | Kitsos API (`mail`, `verify`, `keys-api`, `utility`, …) |
-| `attributes.custom["kitsos.api.name"]` | Stable Kitsos API name |
-| `attributes.custom["kitsos.request.path"]` | Sanitized path without query string, UUIDs or tokens |
+| `attributes.url.path` | Sanitized path without query string, UUIDs or tokens |
 | `attributes.custom["kitsos.request.outcome"]` | Final HTTP outcome such as `success`, `rate_limited`, or `server_error` |
 | `attributes.custom["kitsos.request.reason"]` | Stable final HTTP reason |
-| `attributes.custom["kitsos.request.duration_ms"]` | End-to-end Worker duration |
 | `attributes.custom["kitsos.user.id"]` | Internal Clerk user ID |
-| `attributes.custom["kitsos.auth.method"]` | `api_key` or `session` |
+| `attributes.custom["kitsos.auth.method"]` | `anonymous`, `bearer`, `api_key`, or `session` |
+| `attributes.custom["kitsos.api_key.used"]` | Whether a Kitsos API key was presented |
 | `attributes.custom["kitsos.api_key.id"]` | Internal key ID, if used |
 | `attributes.custom["kitsos.request.scope"]` | Scope checked for the request |
-| `attributes.custom["kitsos.event.name"]` | Last semantic event on the request |
-| `attributes.custom["kitsos.event.outcome"]` | `success`, `allowed`, `denied`, `rate_limited`, `error`, or `noop` |
-| `attributes.custom["kitsos.event.reason"]` | Stable reason for the semantic event |
-| `attributes.custom["error.code"]` | Stable machine-readable failure reason |
 | `attributes.custom["cloudflare.ray_id"]` | Cloudflare Ray ID for support correlation |
 | `attributes.custom["cloudflare.colo"]` | Cloudflare data center |
 | `attributes.custom["client.country"]` | Country code supplied by Cloudflare |
 | `attributes.custom["client.asn"]` | ASN supplied by Cloudflare |
 | `attributes.http.response.status_code` | Final HTTP response status |
 | `attributes.http.request.method` | HTTP method |
-| `attributes.url.path` | Sanitized request path |
+| `duration` | End-to-end Worker duration |
+| `attributes.faas.coldstart` | Whether Cloudflare started a fresh isolate |
 
-Valid API-key requests contain `kitsos.api_key.id`. Invalid keys contain only
-a 16-character SHA-256 fingerprint so repeated attempts can be correlated.
+Anonymous and session requests have `kitsos.api_key.used = false`. Presented
+Kitsos keys have `kitsos.api_key.used = true`; valid keys additionally contain
+`kitsos.api_key.id`. Invalid keys contain only a 16-character SHA-256
+fingerprint in their `auth.decision` event so repeated attempts can be
+correlated.
 No email address, raw API key, full API-key hash, authorization header,
 confirmation token, webhook secret, request body, query string, cookie, or
 full URL is added to telemetry.
 
 ## Semantic events
 
-Events are stored both in the span's `events` array and, for simple filtering,
-as the latest `kitsos.event.*` attributes. Current event names include:
+Events are stored only in the span's `events` array so their data is not
+duplicated on the root span. Current event names include:
 
-- `request.completed`, `auth.decision`, `resource.authorization`,
-  `usage.decision`, `rate_limit.decision`
+- `auth.decision`, `resource.authorization`, `usage.decision`,
+  `rate_limit.decision`
 - `hme.alias.create`, `hme.alias.update`, `hme.alias.delete`,
   `hme.email.forward`
 - `mail.message.send`, `mail.verification.send`, `mail.webhook.deliver`,
@@ -54,13 +54,14 @@ as the latest `kitsos.event.*` attributes. Current event names include:
   `keys.limit_request.deny`
 
 Event fields use internal user, key, resource, and verification IDs. Failure
-events have a stable `error.code` and a sanitized `error.message` where useful.
+events have a stable `event.reason` and a sanitized `error.message` where
+useful.
 
 ### Failures by event, user, and key
 
 ```apl
 ['YOUR_AXIOM_DATASET']
-| where ['attributes.custom']['kitsos.telemetry.schema_version'] == 2
+| where ['attributes.custom']['kitsos.telemetry.schema_version'] == 3
 | mv-expand events
 | extend
     event_name = tostring(events.name),

@@ -19,17 +19,11 @@ export function recordAuthDecision(fields: DecisionFields): void {
       ? "error"
       : fields.outcome;
   const attributes = {
-    "event.name": "auth.decision",
     "event.category": "authentication",
     "event.outcome": eventOutcome,
     ...(fields.reason ? { "event.reason": fields.reason } : {}),
-    "kitsos.event.name": "auth.decision",
-    "kitsos.event.outcome": eventOutcome,
-    ...(fields.reason ? { "kitsos.event.reason": fields.reason } : {}),
     "kitsos.api.name": fields.appId,
-    "kitsos.app.id": fields.appId,
     "kitsos.request.scope": fields.requiredScope,
-    ...(fields.reason ? { "error.code": fields.reason } : {}),
     ...(fields.context ? {
       "kitsos.user.id": fields.context.userId,
       "kitsos.auth.method": fields.context.method,
@@ -38,7 +32,6 @@ export function recordAuthDecision(fields: DecisionFields): void {
     ...(fields.keyFingerprint ? { "kitsos.api_key.fingerprint": fields.keyFingerprint } : {}),
   };
   span.addEvent("auth.decision", attributes);
-  span.setAttributes(attributes);
 }
 
 export function recordResourceDecision(
@@ -51,23 +44,16 @@ export function recordResourceDecision(
   const span = trace.getActiveSpan();
   if (!span) return;
   const attributes = {
-    "event.name": "resource.authorization",
     "event.category": "authorization",
     "event.outcome": outcome,
     ...(reason ? { "event.reason": reason } : {}),
-    "kitsos.event.name": "resource.authorization",
-    "kitsos.event.outcome": outcome,
-    ...(reason ? { "kitsos.event.reason": reason } : {}),
     "kitsos.user.id": context.userId,
     "kitsos.api.name": context.appId,
-    "kitsos.app.id": context.appId,
     "kitsos.resource.type": resourceType,
     ...(resourceId ? { "kitsos.resource.id": resourceId } : {}),
     ...(context.apiKeyId ? { "kitsos.api_key.id": context.apiKeyId } : {}),
-    ...(reason ? { "error.code": reason } : {}),
   };
   span.addEvent("resource.authorization", attributes);
-  span.setAttributes(attributes);
 }
 
 export function recordUsageDecision(
@@ -86,25 +72,18 @@ export function recordUsageDecision(
     ? "rate_limited"
     : outcome;
   const attributes = {
-    "event.name": "usage.decision",
     "event.category": "usage",
     "event.outcome": eventOutcome,
     ...(reason ? { "event.reason": reason } : {}),
-    "kitsos.event.name": "usage.decision",
-    "kitsos.event.outcome": eventOutcome,
-    ...(reason ? { "kitsos.event.reason": reason } : {}),
     "kitsos.user.id": userId,
     "kitsos.api.name": appId,
-    "kitsos.app.id": appId,
     "limit.type": limitType,
     "limit.value": limit,
     "usage.current": current,
     "usage.cost": cost,
     "usage.next": current + cost,
-    ...(reason ? { "error.code": reason } : {}),
   };
   span.addEvent("usage.decision", attributes);
-  span.setAttributes(attributes);
 }
 
 export function recordRateLimitDecision(
@@ -119,20 +98,14 @@ export function recordRateLimitDecision(
   const reason = failureReason
     ?? (outcome === "rate_limited" ? "rate-limit-exceeded" : undefined);
   const attributes = {
-    "event.name": "rate_limit.decision",
     "event.category": "rate_limit",
     "event.outcome": outcome,
     ...(reason ? { "event.reason": reason } : {}),
-    "kitsos.event.name": "rate_limit.decision",
-    "kitsos.event.outcome": outcome,
-    ...(reason ? { "kitsos.event.reason": reason, "error.code": reason } : {}),
     "kitsos.api.name": appId,
-    "kitsos.app.id": appId,
     "limit.bucket": bucket,
     ...(retryAfterSeconds ? { "limit.retry_after_seconds": retryAfterSeconds } : {}),
   };
   span.addEvent("rate_limit.decision", attributes);
-  span.setAttributes(attributes);
 }
 
 /**
@@ -152,9 +125,8 @@ export function annotateAuthenticatedRequest(
 
   span.setAttributes({
     "kitsos.user.id": context.userId,
-    "kitsos.api.name": appId ?? context.appId,
-    "kitsos.app.id": appId ?? context.appId,
     "kitsos.auth.method": context.method,
+    "kitsos.api_key.used": context.method === "api_key",
     ...(context.apiKeyId ? { "kitsos.api_key.id": context.apiKeyId } : {}),
     ...(requiredScope ? { "kitsos.request.scope": requiredScope } : {}),
   });
