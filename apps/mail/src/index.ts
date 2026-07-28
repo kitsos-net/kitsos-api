@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { authenticate, checkResourceGrant, checkKeyResourceAccess, checkRateLimit, checkUsageLimitForUser, getUsageLimit, sha256Hex, withRetryAfter } from "@kitsos/auth";
+import { authenticate, checkResourceGrant, checkKeyResourceAccess, checkRateLimit, checkUsageLimitForUser, getUsageLimit, recordRateLimitDecision, sha256Hex, withRetryAfter } from "@kitsos/auth";
 import { recordError, recordEvent, withTelemetry } from "@kitsos/telemetry";
 import { resolvePayload } from "./dotpath";
 import { sendViaBrevo } from "./brevo";
@@ -42,7 +42,10 @@ function escapeHtml(value: string) {
 app.post("/webhook/:webhookId", async (c) => {
   const webhookId = c.req.param("webhookId");
   const rate = await checkRateLimit(c.env, `mail:webhook:${webhookId}`, { windowSeconds: 60, maxRequests: 30 });
-  if (!rate.allowed) return withRetryAfter(c.json({ error: rate.reason }, 429), rate);
+  if (!rate.allowed) {
+    recordRateLimitDecision(APP_ID, "webhook", "rate_limited", rate.retryAfterSeconds);
+    return withRetryAfter(c.json({ error: rate.reason }, 429), rate);
+  }
   const providedSecret = c.req.header("X-Webhook-Secret") ?? "";
   if (!providedSecret) return c.json({ error: "missing-secret" }, 401);
 
@@ -418,4 +421,6 @@ app.delete("/webhooks/:webhookId", async (c) => {
 
 app.get("/health", (c) => c.json({ ok: true }));
 
-export default withTelemetry(app, "mail");
+export default withTelemetry({
+  fetch: app.fetch,
+} satisfies ExportedHandler<Env>, "mail");

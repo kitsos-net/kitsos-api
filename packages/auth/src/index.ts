@@ -1,6 +1,10 @@
 import type { Env, AuthContext, CheckResult, RateLimitOptions } from "./types";
 import { verifyClerkSession, ensureUserRow } from "./clerk";
-import { annotateAuthenticatedRequest, recordAuthDecision } from "./telemetry";
+import {
+  annotateAuthenticatedRequest,
+  recordAuthDecision,
+  recordRateLimitDecision,
+} from "./telemetry";
 import {
   validateApiKey,
   checkScope,
@@ -30,6 +34,7 @@ export {
   checkKeyResourceAccess,
   writeAuditLog,
   sha256Hex,
+  recordRateLimitDecision,
 };
 
 /** Applies RFC 9110's Retry-After header when a limiter rejected a request. */

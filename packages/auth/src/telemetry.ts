@@ -13,9 +13,18 @@ type DecisionFields = {
 export function recordAuthDecision(fields: DecisionFields): void {
   const span = trace.getActiveSpan();
   if (!span) return;
+  const eventOutcome = fields.reason?.includes("rate-limit")
+    ? "rate_limited"
+    : fields.outcome;
   const attributes = {
     "event.name": "auth.decision",
-    "event.outcome": fields.outcome,
+    "event.category": "authentication",
+    "event.outcome": eventOutcome,
+    ...(fields.reason ? { "event.reason": fields.reason } : {}),
+    "kitsos.event.name": "auth.decision",
+    "kitsos.event.outcome": eventOutcome,
+    ...(fields.reason ? { "kitsos.event.reason": fields.reason } : {}),
+    "kitsos.api.name": fields.appId,
     "kitsos.app.id": fields.appId,
     "kitsos.request.scope": fields.requiredScope,
     ...(fields.reason ? { "error.code": fields.reason } : {}),
@@ -41,8 +50,14 @@ export function recordResourceDecision(
   if (!span) return;
   const attributes = {
     "event.name": "resource.authorization",
+    "event.category": "authorization",
     "event.outcome": outcome,
+    ...(reason ? { "event.reason": reason } : {}),
+    "kitsos.event.name": "resource.authorization",
+    "kitsos.event.outcome": outcome,
+    ...(reason ? { "kitsos.event.reason": reason } : {}),
     "kitsos.user.id": context.userId,
+    "kitsos.api.name": context.appId,
     "kitsos.app.id": context.appId,
     "kitsos.resource.type": resourceType,
     ...(resourceId ? { "kitsos.resource.id": resourceId } : {}),
@@ -65,10 +80,19 @@ export function recordUsageDecision(
 ): void {
   const span = trace.getActiveSpan();
   if (!span) return;
+  const eventOutcome = reason?.includes("limit") && outcome === "denied"
+    ? "rate_limited"
+    : outcome;
   const attributes = {
     "event.name": "usage.decision",
-    "event.outcome": outcome,
+    "event.category": "usage",
+    "event.outcome": eventOutcome,
+    ...(reason ? { "event.reason": reason } : {}),
+    "kitsos.event.name": "usage.decision",
+    "kitsos.event.outcome": eventOutcome,
+    ...(reason ? { "kitsos.event.reason": reason } : {}),
     "kitsos.user.id": userId,
+    "kitsos.api.name": appId,
     "kitsos.app.id": appId,
     "limit.type": limitType,
     "limit.value": limit,
@@ -78,6 +102,32 @@ export function recordUsageDecision(
     ...(reason ? { "error.code": reason } : {}),
   };
   span.addEvent("usage.decision", attributes);
+  span.setAttributes(attributes);
+}
+
+export function recordRateLimitDecision(
+  appId: string,
+  bucket: string,
+  outcome: "allowed" | "rate_limited",
+  retryAfterSeconds?: number
+): void {
+  const span = trace.getActiveSpan();
+  if (!span) return;
+  const reason = outcome === "rate_limited" ? "rate-limit-exceeded" : undefined;
+  const attributes = {
+    "event.name": "rate_limit.decision",
+    "event.category": "rate_limit",
+    "event.outcome": outcome,
+    ...(reason ? { "event.reason": reason } : {}),
+    "kitsos.event.name": "rate_limit.decision",
+    "kitsos.event.outcome": outcome,
+    ...(reason ? { "kitsos.event.reason": reason, "error.code": reason } : {}),
+    "kitsos.api.name": appId,
+    "kitsos.app.id": appId,
+    "limit.bucket": bucket,
+    ...(retryAfterSeconds ? { "limit.retry_after_seconds": retryAfterSeconds } : {}),
+  };
+  span.addEvent("rate_limit.decision", attributes);
   span.setAttributes(attributes);
 }
 
@@ -98,6 +148,7 @@ export function annotateAuthenticatedRequest(
 
   span.setAttributes({
     "kitsos.user.id": context.userId,
+    "kitsos.api.name": appId ?? context.appId,
     "kitsos.app.id": appId ?? context.appId,
     "kitsos.auth.method": context.method,
     ...(context.apiKeyId ? { "kitsos.api_key.id": context.apiKeyId } : {}),

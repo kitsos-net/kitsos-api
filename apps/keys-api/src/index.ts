@@ -471,4 +471,6 @@ app.route("/me", me);
 
 app.get("/health", (c) => c.json({ ok: true }));
 
-export default withTelemetry(app, "keys-api");
+export default withTelemetry({
+  fetch: app.fetch,
+} satisfies ExportedHandler<Env>, "keys-api");

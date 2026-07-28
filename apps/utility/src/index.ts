@@ -1,7 +1,12 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { cors } from "hono/cors";
-import { authenticateApiKey, checkRateLimit, withRetryAfter } from "@kitsos/auth";
+import {
+  authenticateApiKey,
+  checkRateLimit,
+  recordRateLimitDecision,
+  withRetryAfter,
+} from "@kitsos/auth";
 import { withTelemetry } from "@kitsos/telemetry";
 import type { Env } from "./env";
 
@@ -45,7 +50,10 @@ function validDnsName(name: string) {
 async function authorize(c: UtilityContext, scope: string): Promise<Response | null> {
   if (!c.req.header("Authorization")) {
     const rate = await checkRateLimit(c.env, `utility:public:${clientIp(c.req.raw)}`, PUBLIC_RATE_LIMIT);
-    if (!rate.allowed) return withRetryAfter(c.json({ error: "public-rate-limit-exceeded", message: "The public limit is exhausted. Use a Kitsos API key for higher limits." }, 429), rate);
+    if (!rate.allowed) {
+      recordRateLimitDecision(APP_ID, "public-ip", "rate_limited", rate.retryAfterSeconds);
+      return withRetryAfter(c.json({ error: "public-rate-limit-exceeded", message: "The public limit is exhausted. Use a Kitsos API key for higher limits." }, 429), rate);
+    }
     c.set("authenticated", false);
     return null;
   }
