@@ -182,4 +182,9 @@ app.get("/dns/:provider", (c) => {
 });
 
 app.get("/health", (c) => c.json({ ok: true }));
-export default withTelemetry(app, "utility");
+// Pass an explicit Worker handler to the OTel wrapper. This keeps Hono's
+// request handler bound correctly and matches the telemetry integration used
+// by the multi-trigger workers.
+export default withTelemetry({
+  fetch: app.fetch,
+} satisfies ExportedHandler<Env>, "utility");
