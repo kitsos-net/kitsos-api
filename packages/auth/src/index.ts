@@ -37,9 +37,9 @@ export {
   recordRateLimitDecision,
 };
 
-/** Applies RFC 9110's Retry-After header for exhausted or unavailable limiters. */
+/** Applies RFC 9110's Retry-After header when a request limit was exhausted. */
 export function withRetryAfter(response: Response, check: CheckResult): Response {
-  if ((check.status === 429 || check.status === 503) && check.retryAfterSeconds) {
+  if (check.status === 429 && check.retryAfterSeconds) {
     response.headers.set("Retry-After", String(check.retryAfterSeconds));
   }
   return response;

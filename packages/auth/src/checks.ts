@@ -193,7 +193,6 @@ export async function checkRateLimit(
       allowed: false,
       status: 503,
       reason: "rate-limit-storage-unavailable",
-      retryAfterSeconds: 60,
     };
   }
 }
@@ -298,7 +297,6 @@ export async function checkUsageLimitForUser(
       allowed: false,
       status: 503,
       reason: "usage-limit-storage-unavailable",
-      retryAfterSeconds: 60,
     };
   }
 }
