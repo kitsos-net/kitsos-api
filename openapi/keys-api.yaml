@@ -4,11 +4,20 @@ info:
   description: >
     Management API for the Kitsos API platform — users, groups, apps,
     policies, API keys, usage limits, and audit log.
-  version: "0.1.0"
+  version: "1.0.0"
 servers:
-  - url: https://keys.api.kitsos.net
+  - url: https://keys.api.kitsos.net/v1
 
 components:
+  parameters:
+    PageLimit:
+      name: limit
+      in: query
+      schema: { type: integer, default: 100, minimum: 1, maximum: 500 }
+    PageOffset:
+      name: offset
+      in: query
+      schema: { type: integer, default: 0, minimum: 0, maximum: 100000 }
   securitySchemes:
     clerkSession:
       type: http
@@ -39,10 +48,11 @@ components:
       type: object
       properties:
         id: { type: string }
-        appId: { type: string }
-        subjectType: { type: string, enum: [user, group] }
-        subjectId: { type: string }
+        app_id: { type: string }
+        subject_type: { type: string, enum: [user, group] }
+        subject_id: { type: string }
         scopes: { type: array, items: { type: string } }
+        created_at: { type: integer }
     ApiKey:
       type: object
       properties:
@@ -50,28 +60,44 @@ components:
         user_id: { type: string }
         app_id: { type: string }
         name: { type: string, nullable: true }
+        description: { type: string, maxLength: 2000, nullable: true }
         status: { type: string, enum: [active, revoked, expired] }
-        scopes: { type: array, items: { type: string } }
+        scopes: { type: array, maxItems: 100, items: { type: string, maxLength: 100 } }
         expires_at: { type: integer, nullable: true }
         last_used_at: { type: integer, nullable: true }
         created_at: { type: integer }
     ApiKeyCreated:
-      allOf:
-        - $ref: '#/components/schemas/ApiKey'
-        - type: object
-          properties:
-            key:
-              type: string
-              description: Raw API key — shown only once, at creation time.
+      type: object
+      required: [id, key]
+      properties:
+        id: { type: string }
+        key:
+          type: string
+          description: Raw API key — shown only once, at creation time.
+        scopes: { type: array, items: { type: string } }
     UsageLimit:
       type: object
       properties:
         id: { type: string }
-        userId: { type: string }
+        user_id: { type: string }
+        app_id: { type: string }
+        limit_type: { type: string }
+        limit_value: { type: integer }
+        is_override: { type: boolean }
+        created_at: { type: integer }
+    EffectiveLimit:
+      type: object
+      required: [appId, limitType, limitValue, currentValue, remaining, maximumValue, daily]
+      properties:
         appId: { type: string }
-        limitType: { type: string }
-        limitValue: { type: integer }
-        isOverride: { type: boolean }
+        limitType:
+          type: string
+          enum: [emails_per_day, mail_templates, mail_webhooks, hme_aliases, verified_resources, verification_attempts_per_day, api_keys]
+        limitValue: { type: integer, minimum: 1 }
+        currentValue: { type: integer, minimum: 0 }
+        remaining: { type: integer, minimum: 0 }
+        maximumValue: { type: integer, minimum: 1 }
+        daily: { type: boolean }
     LimitIncreaseRequest:
       type: object
       properties:
@@ -112,6 +138,9 @@ paths:
     get:
       summary: List all apps
       tags: [admin]
+      parameters:
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageOffset' }
       responses:
         "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/App' } } } } }
     post:
@@ -172,6 +201,9 @@ paths:
     get:
       summary: List all users
       tags: [admin]
+      parameters:
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageOffset' }
       responses:
         "200": { description: OK }
 
@@ -196,6 +228,9 @@ paths:
     get:
       summary: List all groups
       tags: [admin]
+      parameters:
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageOffset' }
       responses:
         "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Group' } } } } }
     post:
@@ -251,6 +286,8 @@ paths:
       tags: [admin]
       parameters:
         - { name: appId, in: query, schema: { type: string } }
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageOffset' }
       responses:
         "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Policy' } } } } }
     post:
@@ -286,6 +323,8 @@ paths:
       tags: [admin]
       parameters:
         - { name: userId, in: query, schema: { type: string } }
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageOffset' }
       responses:
         "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/ApiKey' } } } } }
     post:
@@ -299,10 +338,11 @@ paths:
               type: object
               required: [userId, appId, scopes]
               properties:
-                userId: { type: string }
-                appId: { type: string }
-                name: { type: string }
-                scopes: { type: array, items: { type: string } }
+                userId: { type: string, maxLength: 100 }
+                appId: { type: string, maxLength: 63 }
+                name: { type: string, maxLength: 100 }
+                description: { type: string, maxLength: 2000 }
+                scopes: { type: array, minItems: 1, maxItems: 100, items: { type: string, maxLength: 100 } }
                 expiresAt: { type: integer }
       responses:
         "201":
@@ -326,6 +366,8 @@ paths:
       tags: [admin]
       parameters:
         - { name: userId, in: query, schema: { type: string } }
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageOffset' }
       responses:
         "200": { description: OK }
     post:
@@ -353,6 +395,8 @@ paths:
       tags: [admin]
       parameters:
         - { name: status, in: query, schema: { type: string, default: pending } }
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageOffset' }
       responses:
         "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/LimitIncreaseRequest' } } } } }
 
@@ -380,7 +424,8 @@ paths:
       tags: [admin]
       parameters:
         - { name: userId, in: query, schema: { type: string } }
-        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 500 } }
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageOffset' }
       responses:
         "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/AuditLogEntry' } } } } }
 
@@ -391,10 +436,26 @@ paths:
       responses:
         "200": { description: OK }
 
+  /me/limits:
+    get:
+      summary: Get effective product limits and current usage
+      tags: [self-service]
+      responses:
+        "200":
+          description: All adjustable limits, including their non-overridable maxima
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/EffectiveLimit' }
+
   /me/api-keys:
     get:
       summary: List own API keys
       tags: [self-service]
+      parameters:
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageOffset' }
       responses:
         "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/ApiKey' } } } } }
     post:
@@ -408,9 +469,10 @@ paths:
               type: object
               required: [appId, scopes]
               properties:
-                appId: { type: string }
-                name: { type: string }
-                scopes: { type: array, items: { type: string } }
+                appId: { type: string, maxLength: 63 }
+                name: { type: string, maxLength: 100 }
+                description: { type: string, maxLength: 2000 }
+                scopes: { type: array, minItems: 1, maxItems: 100, items: { type: string, maxLength: 100 } }
       responses:
         "201":
           description: Created
@@ -419,6 +481,9 @@ paths:
               schema: { $ref: '#/components/schemas/ApiKeyCreated' }
         "403":
           description: None of the requested scopes are allowed by your policy
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        "429":
+          description: Stored-key or hard creation-churn limit exceeded
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
 
   /me/api-keys/{keyId}:
@@ -434,6 +499,9 @@ paths:
     get:
       summary: List your own limit increase requests
       tags: [self-service]
+      parameters:
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageOffset' }
       responses:
         "200": { description: OK }
     post:
@@ -447,12 +515,16 @@ paths:
               type: object
               required: [appId, limitType, requestedValue]
               properties:
-                appId: { type: string }
-                limitType: { type: string }
-                requestedValue: { type: integer }
-                reason: { type: string }
+                appId: { type: string, maxLength: 63 }
+                limitType:
+                  type: string
+                  enum: [emails_per_day, mail_templates, mail_webhooks, hme_aliases, verified_resources, verification_attempts_per_day, api_keys]
+                requestedValue: { type: integer, minimum: 1, maximum: 10000 }
+                reason: { type: string, maxLength: 2000 }
       responses:
         "201": { description: Created }
+        "409": { description: A request for this limit is already pending }
+        "429": { description: Five requests are already pending, or the hard daily request-churn limit was reached }
 
   /analytics/overview:
     get:

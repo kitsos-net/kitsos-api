@@ -21,8 +21,7 @@ worker — imported directly into each app (`dns-manager`, `hide-my-email`,
    (`kitsos-api-usage-counters`), cheap enough for Free Tier.
 5. **Usage limits** — daily/period budgets per user+app+limit_type,
    configurable per user via `usage_limits.is_override`, with
-   `limit_increase_requests` as the admin-approved increase flow (not
-   yet wired into an endpoint — that's part of the Admin UI work).
+   `limit_increase_requests` as the admin-approved increase flow.
 6. **Audit log** — every allow/deny decision is written to
    `audit_log`, fire-and-forget so it never blocks the request.
 
@@ -61,11 +60,11 @@ concurrently active keys before you need Workers Paid ($5/mo, which
 also lifts the KV write cap). This was a deliberate tradeoff made
 during the original design discussion — see [[kitsos-api-platform]].
 
+The product-limit catalog, defaults, and hard maxima are documented in
+[`../../LIMITS.md`](../../LIMITS.md). Daily product counters use atomic D1
+upserts so concurrent requests cannot overshoot a quota.
+
 ## Not yet implemented here
 
-- Admin UI for approving `limit_increase_requests`
 - Cron worker for resource re-verification reminders / grace-period
   cutoffs (30d DNS zones, 90d email addresses)
-- `verify.api.kitsos.net` (the actual DNS-TXT poll / magic-link
-  delivery) — `@kitsos/auth` only reads `resource_verifications`,
-  it doesn't create them

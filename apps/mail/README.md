@@ -1,6 +1,6 @@
 # mail
 
-`mail.api.kitsos.net` — email sending, both manual (`POST /send`) and
+`mail.api.kitsos.net/v1` — email sending, both manual (`POST /send`) and
 via user-managed webhooks with dot-notation payload → template
 mapping (built to replace Certimate's broken `text/plain`-only HTML
 emails, see [[kitsos-mail-api]]).
@@ -11,8 +11,9 @@ emails, see [[kitsos-mail-api]]).
   (hashed, compared against `mail_webhooks.secret_hash`). No
   `@kitsos/auth` involved — the webhook secret *is* the credential.
 - Everything else — `kitsos_...` API key via `@kitsos/auth`, scopes
-  `mail:send` (for `/send` and webhook creation, since that also
-  needs a resource grant) and `mail:manage` (templates/webhooks CRUD).
+  `mail:send` (for `/send`) and `mail:manage` (templates/webhooks CRUD).
+  Creating or changing a webhook requires both scopes because it configures
+  a send-capable endpoint.
 - **`from` address is checked against `resource_grants`** — a key can
   only send as (or create a webhook sending as) an address it has been
   granted via `verify.api.kitsos.net` (`resourceType: "email_address"`).
@@ -39,7 +40,7 @@ POST /webhooks
     "errorMessage": "error.message"
   }
 }
-→ { "id": "...", "secret": "...", "url": "https://mail.api.kitsos.net/webhook/..." }
+→ { "id": "...", "secret": "...", "url": "https://mail.api.kitsos.net/v1/webhook/..." }
 ```
 
 The `secret` is only ever shown here. Point Certimate (or whatever)
@@ -47,10 +48,11 @@ at the returned `url` with `X-Webhook-Secret: <secret>`.
 
 ## Limits
 
-Default 10 webhooks / 20 emails per day per user, overridable per-user
-via a row in `mail_user_limits` (no self-service increase yet — insert
-manually, or wire up `keys-api`'s `limit_increase_requests` flow to
-write here later).
+Default 10 stored webhooks, 20 stored templates, and 20 email recipients per
+UTC day per user. Manual, template-based, and webhook sends share the same
+atomic daily counter. Limits can be increased through `keys-api`'s
+`limit_increase_requests` flow up to the hard maxima in
+[`../../LIMITS.md`](../../LIMITS.md).
 
 ## Setup
 

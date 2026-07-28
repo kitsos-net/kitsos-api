@@ -8,9 +8,16 @@ import {
   checkUsageLimit,
   writeAuditLog,
   sha256Hex,
+  constantTimeEqual,
+  getPolicyScopes,
+  invalidateApiKeyCache,
+  invalidateAppApiKeyCaches,
+  invalidateGroupApiKeyCaches,
+  invalidateUserApiKeyCaches,
 } from "./checks";
 
 export * from "./types";
+export * from "./limits";
 export {
   verifyClerkSession,
   ensureUserRow,
@@ -21,6 +28,12 @@ export {
   checkUsageLimit,
   writeAuditLog,
   sha256Hex,
+  constantTimeEqual,
+  getPolicyScopes,
+  invalidateApiKeyCache,
+  invalidateAppApiKeyCaches,
+  invalidateGroupApiKeyCaches,
+  invalidateUserApiKeyCaches,
 };
 
 const DEFAULT_RATE_LIMIT: RateLimitOptions = { windowSeconds: 60, maxRequests: 60 };
@@ -51,6 +64,9 @@ export async function authenticate(
   if (!token) {
     return { allowed: false, status: 401, reason: "missing-credentials" };
   }
+  if (token.length > 8192) {
+    return { allowed: false, status: 401, reason: "invalid-credentials" };
+  }
 
   let context: AuthContext | null = null;
 
@@ -60,13 +76,16 @@ export async function authenticate(
     const session = await verifyClerkSession(token, env);
     if (session) {
       await ensureUserRow(session.userId, env);
-      context = {
-        method: "session",
-        userId: session.userId,
-        appId,
-        scopes: [requiredScope], // session auth (Admin UI etc.) trusted at full scope; refine per-app if needed
-        groupIds: [],
-      };
+      const policy = await getPolicyScopes(env, session.userId, appId);
+      if (policy) {
+        context = {
+          method: "session",
+          userId: session.userId,
+          appId,
+          scopes: policy.scopes,
+          groupIds: policy.groupIds,
+        };
+      }
     }
   }
 
@@ -131,6 +150,9 @@ export async function authenticateApiKey(
   const token = authHeader.replace(/^Bearer\s+/i, "");
 
   if (!token) return { allowed: false, status: 401, reason: "missing-credentials" };
+  if (token.length > 256) {
+    return { allowed: false, status: 401, reason: "invalid-credentials" };
+  }
   if (!token.startsWith("kitsos_")) {
     return { allowed: false, status: 401, reason: "api-key-required" };
   }

@@ -1,22 +1,88 @@
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
-import { sha256Hex } from "@kitsos/auth";
+import {
+  consumeHardDailyLimit,
+  getEffectiveLimit,
+  invalidateApiKeyCache,
+  invalidateAppApiKeyCaches,
+  invalidateGroupApiKeyCaches,
+  invalidateUserApiKeyCaches,
+  LIMIT_DEFINITIONS,
+  isValidLimitConfiguration,
+  sha256Hex,
+} from "@kitsos/auth";
 import { withTelemetry } from "@kitsos/telemetry";
 import { requireAdmin, requireUser } from "./middleware";
 import analytics from "./analytics";
+import { boundedLimit, boundedOffset, isNonEmptyString, isStringArray } from "./validation";
 import type { Env } from "./env";
 
 type Vars = { userId: string };
-const app = new Hono<{ Bindings: Env; Variables: Vars }>();
+const app = new Hono<{ Bindings: Env; Variables: Vars }>().basePath("/v1");
 
+app.use("*", async (c, next) => {
+  if (c.req.url.length > 8192) return c.json({ error: "uri-too-long" }, 414);
+  await next();
+});
+app.use("*", bodyLimit({
+  maxSize: 64 * 1024,
+  onError: (c) => c.json({ error: "request-body-too-large" }, 413),
+}));
 app.use("*", cors({
-  origin: "*",
+  origin: (origin, c) => {
+    const configured = (c.env as Env).CORS_ORIGINS
+      ?? "https://apidev.kitsos.net,https://myaccount.kitsos.net";
+    return configured.split(",").map((item) => item.trim()).includes(origin) ? origin : null;
+  },
   allowHeaders: ["Authorization", "Content-Type"],
   allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
 }));
 
 function id() {
   return crypto.randomUUID();
+}
+
+function pagination(c: { req: { query(name: string): string | undefined } }) {
+  const limit = boundedLimit(c.req.query("limit"));
+  const offset = boundedOffset(c.req.query("offset"));
+  return limit === null || offset === null ? null : { limit, offset };
+}
+
+function decodeJsonFields(
+  rows: Record<string, unknown>[],
+  fields: string[]
+): Record<string, unknown>[] {
+  return rows.map((row) => {
+    const decoded = { ...row };
+    for (const field of fields) {
+      if (typeof decoded[field] === "string") {
+        try {
+          decoded[field] = JSON.parse(decoded[field] as string);
+        } catch {
+          decoded[field] = [];
+        }
+      }
+    }
+    return decoded;
+  });
+}
+
+async function prepareApiKeyCreation(env: Env, userId: string): Promise<number | null> {
+  await env.DB.prepare(
+    "DELETE FROM api_keys WHERE user_id = ? AND expires_at IS NOT NULL AND expires_at <= unixepoch()"
+  )
+    .bind(userId)
+    .run();
+  const withinHardCreationLimit = await consumeHardDailyLimit(
+    env,
+    userId,
+    "keys-api",
+    "api_key_creations_per_day",
+    100
+  );
+  if (!withinHardCreationLimit) return null;
+  return getEffectiveLimit(env, userId, "api_keys");
 }
 
 // ============================================================
@@ -27,12 +93,27 @@ admin.use("*", requireAdmin);
 
 // --- Apps ---
 admin.get("/apps", async (c) => {
-  const r = await c.env.DB.prepare("SELECT * FROM apps ORDER BY name").all();
+  const page = pagination(c);
+  if (!page) return c.json({ error: "invalid-pagination" }, 400);
+  const r = await c.env.DB.prepare("SELECT * FROM apps ORDER BY name, id LIMIT ? OFFSET ?")
+    .bind(page.limit, page.offset)
+    .all();
   return c.json(r.results);
 });
 
 admin.post("/apps", async (c) => {
-  const body = await c.req.json<{ id: string; name: string; description?: string; environment?: string }>();
+  const body = await c.req.json<{ id: string; name: string; description?: string; environment?: string }>().catch(() => null);
+  if (
+    !body
+    || !/^[a-z0-9][a-z0-9-]{0,62}$/.test(body.id)
+    || !isNonEmptyString(body.name, 100)
+    || (body.description !== undefined && (
+      typeof body.description !== "string" || body.description.length > 2_000
+    ))
+    || (body.environment !== undefined && !["production", "staging", "dev"].includes(body.environment))
+  ) {
+    return c.json({ error: "invalid-request-body" }, 400);
+  }
   await c.env.DB.prepare(
     "INSERT INTO apps (id, name, description, environment) VALUES (?, ?, ?, ?)"
   )
@@ -42,13 +123,34 @@ admin.post("/apps", async (c) => {
 });
 
 admin.delete("/apps/:appId", async (c) => {
-  await c.env.DB.prepare("DELETE FROM apps WHERE id = ?").bind(c.req.param("appId")).run();
+  const appId = c.req.param("appId");
+  const dependencies = await c.env.DB.batch([
+    c.env.DB.prepare("SELECT 1 FROM app_scopes WHERE app_id = ? LIMIT 1").bind(appId),
+    c.env.DB.prepare("SELECT 1 FROM policies WHERE app_id = ? LIMIT 1").bind(appId),
+    c.env.DB.prepare("SELECT 1 FROM api_keys WHERE app_id = ? LIMIT 1").bind(appId),
+    c.env.DB.prepare("SELECT 1 FROM resources WHERE app_id = ? LIMIT 1").bind(appId),
+  ]);
+  if (dependencies.some((result) => result.results.length > 0)) {
+    return c.json({ error: "app-has-dependencies" }, 409);
+  }
+  await c.env.DB.prepare("DELETE FROM apps WHERE id = ?").bind(appId).run();
   return c.body(null, 204);
 });
 
 admin.post("/apps/:appId/scopes", async (c) => {
   const appId = c.req.param("appId");
-  const body = await c.req.json<{ scope: string; description?: string }>();
+  const body = await c.req.json<{ scope: string; description?: string }>().catch(() => null);
+  if (
+    !body
+    || typeof body.scope !== "string"
+    || body.scope.length > 100
+    || !/^[a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)+$/.test(body.scope)
+    || (body.description !== undefined && (
+      typeof body.description !== "string" || body.description.length > 2_000
+    ))
+  ) {
+    return c.json({ error: "invalid-request-body" }, 400);
+  }
   await c.env.DB.prepare(
     "INSERT INTO app_scopes (app_id, scope, description) VALUES (?, ?, ?)"
   )
@@ -58,34 +160,57 @@ admin.post("/apps/:appId/scopes", async (c) => {
 });
 
 admin.delete("/apps/:appId/scopes/:scope", async (c) => {
+  const appId = c.req.param("appId");
   await c.env.DB.prepare("DELETE FROM app_scopes WHERE app_id = ? AND scope = ?")
-    .bind(c.req.param("appId"), c.req.param("scope"))
+    .bind(appId, c.req.param("scope"))
     .run();
+  await invalidateAppApiKeyCaches(c.env, appId);
   return c.body(null, 204);
 });
 
 // --- Users ---
 admin.get("/users", async (c) => {
-  const r = await c.env.DB.prepare("SELECT * FROM users ORDER BY created_at DESC").all();
+  const page = pagination(c);
+  if (!page) return c.json({ error: "invalid-pagination" }, 400);
+  const r = await c.env.DB.prepare("SELECT * FROM users ORDER BY created_at DESC, id LIMIT ? OFFSET ?")
+    .bind(page.limit, page.offset)
+    .all();
   return c.json(r.results);
 });
 
 admin.patch("/users/:userId", async (c) => {
-  const body = await c.req.json<{ status: string }>();
+  const body = await c.req.json<{ status: string }>().catch(() => null);
+  if (!body || !["active", "deactivated", "pending_deletion", "deleted"].includes(body.status)) {
+    return c.json({ error: "invalid-status" }, 400);
+  }
   await c.env.DB.prepare("UPDATE users SET status = ? WHERE id = ?")
     .bind(body.status, c.req.param("userId"))
     .run();
+  await invalidateUserApiKeyCaches(c.env, c.req.param("userId"));
   return c.body(null, 204);
 });
 
 // --- Groups ---
 admin.get("/groups", async (c) => {
-  const r = await c.env.DB.prepare("SELECT * FROM groups ORDER BY name").all();
+  const page = pagination(c);
+  if (!page) return c.json({ error: "invalid-pagination" }, 400);
+  const r = await c.env.DB.prepare("SELECT * FROM groups ORDER BY name, id LIMIT ? OFFSET ?")
+    .bind(page.limit, page.offset)
+    .all();
   return c.json(r.results);
 });
 
 admin.post("/groups", async (c) => {
-  const body = await c.req.json<{ name: string; description?: string }>();
+  const body = await c.req.json<{ name: string; description?: string }>().catch(() => null);
+  if (
+    !body
+    || !isNonEmptyString(body.name, 100)
+    || (body.description !== undefined && (
+      typeof body.description !== "string" || body.description.length > 2_000
+    ))
+  ) {
+    return c.json({ error: "invalid-request-body" }, 400);
+  }
   const groupId = id();
   await c.env.DB.prepare("INSERT INTO groups (id, name, description) VALUES (?, ?, ?)")
     .bind(groupId, body.name, body.description ?? null)
@@ -94,15 +219,29 @@ admin.post("/groups", async (c) => {
 });
 
 admin.delete("/groups/:groupId", async (c) => {
-  await c.env.DB.prepare("DELETE FROM groups WHERE id = ?").bind(c.req.param("groupId")).run();
+  const groupId = c.req.param("groupId");
+  const dependencies = await c.env.DB.batch([
+    c.env.DB.prepare("SELECT 1 FROM group_members WHERE group_id = ? LIMIT 1").bind(groupId),
+    c.env.DB.prepare(
+      "SELECT 1 FROM policies WHERE subject_type = 'group' AND subject_id = ? LIMIT 1"
+    ).bind(groupId),
+  ]);
+  if (dependencies.some((result) => result.results.length > 0)) {
+    return c.json({ error: "group-has-dependencies" }, 409);
+  }
+  await c.env.DB.prepare("DELETE FROM groups WHERE id = ?").bind(groupId).run();
   return c.body(null, 204);
 });
 
 admin.post("/groups/:groupId/members", async (c) => {
-  const body = await c.req.json<{ userId: string }>();
+  const body = await c.req.json<{ userId: string }>().catch(() => null);
+  if (!body || !isNonEmptyString(body.userId, 100)) {
+    return c.json({ error: "invalid-request-body" }, 400);
+  }
   await c.env.DB.prepare("INSERT OR IGNORE INTO group_members (group_id, user_id) VALUES (?, ?)")
     .bind(c.req.param("groupId"), body.userId)
     .run();
+  await invalidateUserApiKeyCaches(c.env, body.userId);
   return c.body(null, 204);
 });
 
@@ -110,16 +249,23 @@ admin.delete("/groups/:groupId/members/:userId", async (c) => {
   await c.env.DB.prepare("DELETE FROM group_members WHERE group_id = ? AND user_id = ?")
     .bind(c.req.param("groupId"), c.req.param("userId"))
     .run();
+  await invalidateUserApiKeyCaches(c.env, c.req.param("userId"));
   return c.body(null, 204);
 });
 
 // --- Policies ---
 admin.get("/policies", async (c) => {
+  const page = pagination(c);
+  if (!page) return c.json({ error: "invalid-pagination" }, 400);
   const appId = c.req.query("appId");
   const r = appId
-    ? await c.env.DB.prepare("SELECT * FROM policies WHERE app_id = ?").bind(appId).all()
-    : await c.env.DB.prepare("SELECT * FROM policies").all();
-  return c.json(r.results);
+    ? await c.env.DB.prepare(
+        "SELECT * FROM policies WHERE app_id = ? ORDER BY created_at DESC, id LIMIT ? OFFSET ?"
+      ).bind(appId, page.limit, page.offset).all()
+    : await c.env.DB.prepare(
+        "SELECT * FROM policies ORDER BY created_at DESC, id LIMIT ? OFFSET ?"
+      ).bind(page.limit, page.offset).all();
+  return c.json(decodeJsonFields(r.results, ["scopes"]));
 });
 
 admin.post("/policies", async (c) => {
@@ -128,33 +274,74 @@ admin.post("/policies", async (c) => {
     subjectType: "user" | "group";
     subjectId: string;
     scopes: string[];
-  }>();
+  }>().catch(() => null);
+  if (
+    !body
+    || !isNonEmptyString(body.appId, 63)
+    || !["user", "group"].includes(body.subjectType)
+    || !isNonEmptyString(body.subjectId, 100)
+    || !isStringArray(body.scopes)
+  ) {
+    return c.json({ error: "invalid-request-body" }, 400);
+  }
+  const uniqueScopes = [...new Set(body.scopes)];
+  const subjectTable = body.subjectType === "user" ? "users" : "groups";
+  const subject = await c.env.DB.prepare(`SELECT 1 FROM ${subjectTable} WHERE id = ?`)
+    .bind(body.subjectId)
+    .first();
+  if (!subject) return c.json({ error: "subject-not-found" }, 404);
+  const validScopes = await c.env.DB.prepare(
+    `SELECT COUNT(*) AS count FROM app_scopes
+     WHERE app_id = ? AND scope IN (${uniqueScopes.map(() => "?").join(",")})`
+  )
+    .bind(body.appId, ...uniqueScopes)
+    .first<{ count: number }>();
+  if (validScopes?.count !== uniqueScopes.length) return c.json({ error: "invalid-scopes" }, 400);
   const policyId = id();
   await c.env.DB.prepare(
     "INSERT INTO policies (id, app_id, subject_type, subject_id, scopes) VALUES (?, ?, ?, ?, ?)"
   )
-    .bind(policyId, body.appId, body.subjectType, body.subjectId, JSON.stringify(body.scopes))
+    .bind(policyId, body.appId, body.subjectType, body.subjectId, JSON.stringify(uniqueScopes))
     .run();
+  if (body.subjectType === "user") {
+    await invalidateUserApiKeyCaches(c.env, body.subjectId, body.appId);
+  } else {
+    await invalidateGroupApiKeyCaches(c.env, body.subjectId, body.appId);
+  }
   return c.json({ id: policyId }, 201);
 });
 
 admin.delete("/policies/:policyId", async (c) => {
+  const policy = await c.env.DB.prepare(
+    "SELECT app_id, subject_type, subject_id FROM policies WHERE id = ?"
+  )
+    .bind(c.req.param("policyId"))
+    .first<{ app_id: string; subject_type: string; subject_id: string }>();
+  if (!policy) return c.json({ error: "not-found" }, 404);
   await c.env.DB.prepare("DELETE FROM policies WHERE id = ?").bind(c.req.param("policyId")).run();
+  if (policy.subject_type === "user") {
+    await invalidateUserApiKeyCaches(c.env, policy.subject_id, policy.app_id);
+  } else {
+    await invalidateGroupApiKeyCaches(c.env, policy.subject_id, policy.app_id);
+  }
   return c.body(null, 204);
 });
 
 // --- API Keys (admin: manage any user's keys) ---
 admin.get("/api-keys", async (c) => {
+  const page = pagination(c);
+  if (!page) return c.json({ error: "invalid-pagination" }, 400);
   const userId = c.req.query("userId");
   const r = userId
     ? await c.env.DB
-        .prepare("SELECT id, user_id, app_id, name, status, scopes, expires_at, last_used_at, created_at FROM api_keys WHERE user_id = ?")
-        .bind(userId)
+        .prepare("SELECT id, user_id, app_id, name, description, status, scopes, expires_at, last_used_at, created_at FROM api_keys WHERE user_id = ? ORDER BY created_at DESC, id LIMIT ? OFFSET ?")
+        .bind(userId, page.limit, page.offset)
         .all()
     : await c.env.DB
-        .prepare("SELECT id, user_id, app_id, name, status, scopes, expires_at, last_used_at, created_at FROM api_keys")
+        .prepare("SELECT id, user_id, app_id, name, description, status, scopes, expires_at, last_used_at, created_at FROM api_keys ORDER BY created_at DESC, id LIMIT ? OFFSET ?")
+        .bind(page.limit, page.offset)
         .all();
-  return c.json(r.results); // never returns key_hash / raw key
+  return c.json(decodeJsonFields(r.results, ["scopes"])); // never returns key_hash / raw key
 });
 
 admin.post("/api-keys", async (c) => {
@@ -162,27 +349,80 @@ admin.post("/api-keys", async (c) => {
     userId: string;
     appId: string;
     name?: string;
+    description?: string;
     scopes: string[];
     expiresAt?: number;
-  }>();
+  }>().catch(() => null);
+  if (
+    !body
+    || !isNonEmptyString(body.userId, 100)
+    || !isNonEmptyString(body.appId, 63)
+    || !isStringArray(body.scopes)
+    || (body.name !== undefined && !isNonEmptyString(body.name, 100))
+    || (body.description !== undefined && (
+      typeof body.description !== "string" || body.description.length > 2_000
+    ))
+    || (body.expiresAt !== undefined && (
+      !Number.isSafeInteger(body.expiresAt)
+      || body.expiresAt <= Date.now() / 1000
+      || body.expiresAt > Math.floor(Date.now() / 1000) + 10 * 365 * 24 * 60 * 60
+    ))
+  ) {
+    return c.json({ error: "invalid-request-body" }, 400);
+  }
+  const uniqueScopes = [...new Set(body.scopes)];
+  const user = await c.env.DB.prepare("SELECT 1 FROM users WHERE id = ?")
+    .bind(body.userId)
+    .first();
+  if (!user) return c.json({ error: "user-not-found" }, 404);
+  const validScopes = await c.env.DB.prepare(
+    `SELECT COUNT(*) AS count FROM app_scopes
+     WHERE app_id = ? AND scope IN (${uniqueScopes.map(() => "?").join(",")})`
+  )
+    .bind(body.appId, ...uniqueScopes)
+    .first<{ count: number }>();
+  if (validScopes?.count !== uniqueScopes.length) return c.json({ error: "invalid-scopes" }, 400);
 
   const rawKey = `kitsos_${crypto.randomUUID().replace(/-/g, "")}`;
   const keyHash = await sha256Hex(rawKey);
   const keyId = id();
+  const apiKeyLimit = await prepareApiKeyCreation(c.env, body.userId);
+  if (apiKeyLimit === null) {
+    return c.json({ error: "api-key-creation-abuse-limit-exceeded" }, 429);
+  }
 
-  await c.env.DB.prepare(
-    `INSERT INTO api_keys (id, key_hash, user_id, app_id, name, status, scopes, expires_at)
-     VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`
+  const created = await c.env.DB.prepare(
+    `INSERT INTO api_keys
+       (id, key_hash, user_id, app_id, name, description, status, scopes, expires_at)
+     SELECT ?, ?, ?, ?, ?, ?, 'active', ?, ?
+     WHERE (
+       SELECT COUNT(*) FROM api_keys WHERE user_id = ?
+     ) < ?`
   )
-    .bind(keyId, keyHash, body.userId, body.appId, body.name ?? null, JSON.stringify(body.scopes), body.expiresAt ?? null)
+    .bind(
+      keyId,
+      keyHash,
+      body.userId,
+      body.appId,
+      body.name ?? null,
+      body.description ?? null,
+      JSON.stringify(uniqueScopes),
+      body.expiresAt ?? null,
+      body.userId,
+      apiKeyLimit
+    )
     .run();
+  if (created.meta.changes !== 1) {
+    return c.json({ error: "api-key-limit-exceeded", limit: apiKeyLimit }, 429);
+  }
 
   // rawKey is only ever shown here — not recoverable afterwards
   return c.json({ id: keyId, key: rawKey }, 201);
 });
 
 admin.delete("/api-keys/:keyId", async (c) => {
-  await c.env.DB.prepare("UPDATE api_keys SET status = 'revoked' WHERE id = ?")
+  await invalidateApiKeyCache(c.env, c.req.param("keyId"));
+  await c.env.DB.prepare("DELETE FROM api_keys WHERE id = ?")
     .bind(c.req.param("keyId"))
     .run();
   return c.body(null, 204);
@@ -190,11 +430,18 @@ admin.delete("/api-keys/:keyId", async (c) => {
 
 // --- Usage limits ---
 admin.get("/usage-limits", async (c) => {
+  const page = pagination(c);
+  if (!page) return c.json({ error: "invalid-pagination" }, 400);
   const userId = c.req.query("userId");
   const r = userId
-    ? await c.env.DB.prepare("SELECT * FROM usage_limits WHERE user_id = ?").bind(userId).all()
-    : await c.env.DB.prepare("SELECT * FROM usage_limits").all();
-  return c.json(r.results);
+    ? await c.env.DB.prepare("SELECT * FROM usage_limits WHERE user_id = ? ORDER BY created_at DESC, id LIMIT ? OFFSET ?")
+        .bind(userId, page.limit, page.offset).all()
+    : await c.env.DB.prepare("SELECT * FROM usage_limits ORDER BY created_at DESC, id LIMIT ? OFFSET ?")
+        .bind(page.limit, page.offset).all();
+  return c.json(r.results.map((row) => ({
+    ...row,
+    is_override: Boolean((row as { is_override: number }).is_override),
+  })));
 });
 
 admin.post("/usage-limits", async (c) => {
@@ -204,10 +451,31 @@ admin.post("/usage-limits", async (c) => {
     limitType: string;
     limitValue: number;
     isOverride?: boolean;
-  }>();
+  }>().catch(() => null);
+  if (
+    !body
+    || !isNonEmptyString(body.userId, 100)
+    || !isNonEmptyString(body.appId, 63)
+    || !isNonEmptyString(body.limitType, 100)
+    || !isValidLimitConfiguration(body.appId, body.limitType, body.limitValue)
+    || (body.isOverride !== undefined && typeof body.isOverride !== "boolean")
+  ) {
+    return c.json({ error: "invalid-request-body" }, 400);
+  }
+  const ownerAndApp = await c.env.DB.batch([
+    c.env.DB.prepare("SELECT 1 FROM users WHERE id = ?").bind(body.userId),
+    c.env.DB.prepare("SELECT 1 FROM apps WHERE id = ?").bind(body.appId),
+  ]);
+  if (ownerAndApp.some((result) => result.results.length === 0)) {
+    return c.json({ error: "user-or-app-not-found" }, 404);
+  }
   const limitId = id();
   await c.env.DB.prepare(
-    "INSERT INTO usage_limits (id, user_id, app_id, limit_type, limit_value, is_override) VALUES (?, ?, ?, ?, ?, ?)"
+    `INSERT INTO usage_limits (id, user_id, app_id, limit_type, limit_value, is_override)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(user_id, app_id, limit_type, is_override) DO UPDATE SET
+       limit_value = excluded.limit_value,
+       created_at = unixepoch()`
   )
     .bind(limitId, body.userId, body.appId, body.limitType, body.limitValue, body.isOverride ? 1 : 0)
     .run();
@@ -216,9 +484,16 @@ admin.post("/usage-limits", async (c) => {
 
 // --- Limit increase requests (admin review) ---
 admin.get("/limit-increase-requests", async (c) => {
+  const page = pagination(c);
+  if (!page) return c.json({ error: "invalid-pagination" }, 400);
   const status = c.req.query("status") ?? "pending";
-  const r = await c.env.DB.prepare("SELECT * FROM limit_increase_requests WHERE status = ? ORDER BY created_at")
-    .bind(status)
+  if (!["pending", "approved", "denied"].includes(status)) {
+    return c.json({ error: "invalid-status" }, 400);
+  }
+  const r = await c.env.DB.prepare(
+    "SELECT * FROM limit_increase_requests WHERE status = ? ORDER BY created_at, id LIMIT ? OFFSET ?"
+  )
+    .bind(status, page.limit, page.offset)
     .all();
   return c.json(r.results);
 });
@@ -229,16 +504,27 @@ admin.post("/limit-increase-requests/:reqId/approve", async (c) => {
 
   const req = await c.env.DB.prepare("SELECT * FROM limit_increase_requests WHERE id = ?")
     .bind(reqId)
-    .first<{ user_id: string; app_id: string; limit_type: string; requested_value: number }>();
+    .first<{ user_id: string; app_id: string; limit_type: string; requested_value: number; status: string }>();
   if (!req) return c.json({ error: "not-found" }, 404);
+  if (req.status !== "pending") return c.json({ error: "request-already-reviewed" }, 409);
+  if (!isValidLimitConfiguration(req.app_id, req.limit_type, req.requested_value)) {
+    return c.json({ error: "invalid-limit-request" }, 400);
+  }
 
   await c.env.DB.batch([
     c.env.DB.prepare(
-      "UPDATE limit_increase_requests SET status = 'approved', reviewed_by = ?, reviewed_at = unixepoch() WHERE id = ?"
-    ).bind(adminId, reqId),
+      `INSERT INTO usage_limits (id, user_id, app_id, limit_type, limit_value, is_override)
+       SELECT ?, user_id, app_id, limit_type, requested_value, 1
+       FROM limit_increase_requests WHERE id = ? AND status = 'pending'
+       ON CONFLICT(user_id, app_id, limit_type, is_override) DO UPDATE SET
+         limit_value = excluded.limit_value,
+         created_at = unixepoch()`
+    ).bind(id(), reqId),
     c.env.DB.prepare(
-      "INSERT INTO usage_limits (id, user_id, app_id, limit_type, limit_value, is_override) VALUES (?, ?, ?, ?, ?, 1)"
-    ).bind(id(), req.user_id, req.app_id, req.limit_type, req.requested_value),
+      `UPDATE limit_increase_requests
+       SET status = 'approved', reviewed_by = ?, reviewed_at = unixepoch()
+       WHERE id = ? AND status = 'pending'`
+    ).bind(adminId, reqId),
   ]);
 
   return c.body(null, 204);
@@ -246,24 +532,30 @@ admin.post("/limit-increase-requests/:reqId/approve", async (c) => {
 
 admin.post("/limit-increase-requests/:reqId/deny", async (c) => {
   const adminId = c.get("userId");
-  await c.env.DB.prepare(
-    "UPDATE limit_increase_requests SET status = 'denied', reviewed_by = ?, reviewed_at = unixepoch() WHERE id = ?"
+  const result = await c.env.DB.prepare(
+    `UPDATE limit_increase_requests
+     SET status = 'denied', reviewed_by = ?, reviewed_at = unixepoch()
+     WHERE id = ? AND status = 'pending'`
   )
     .bind(adminId, c.req.param("reqId"))
     .run();
+  if (result.meta.changes !== 1) return c.json({ error: "not-found-or-already-reviewed" }, 409);
   return c.body(null, 204);
 });
 
 // --- Audit log ---
 admin.get("/audit-log", async (c) => {
   const userId = c.req.query("userId");
-  const limit = Math.min(Number(c.req.query("limit") ?? 100), 500);
+  const limit = boundedLimit(c.req.query("limit"));
+  const offset = boundedOffset(c.req.query("offset"));
+  if (limit === null || offset === null) return c.json({ error: "invalid-pagination" }, 400);
   const r = userId
     ? await c.env.DB
-        .prepare("SELECT * FROM audit_log WHERE user_id = ? ORDER BY created_at DESC LIMIT ?")
-        .bind(userId, limit)
+        .prepare("SELECT * FROM audit_log WHERE user_id = ? ORDER BY created_at DESC, id LIMIT ? OFFSET ?")
+        .bind(userId, limit, offset)
         .all()
-    : await c.env.DB.prepare("SELECT * FROM audit_log ORDER BY created_at DESC LIMIT ?").bind(limit).all();
+    : await c.env.DB.prepare("SELECT * FROM audit_log ORDER BY created_at DESC, id LIMIT ? OFFSET ?")
+        .bind(limit, offset).all();
   return c.json(r.results);
 });
 
@@ -280,18 +572,77 @@ me.get("/", async (c) => {
   return c.json(user);
 });
 
+me.get("/limits", async (c) => {
+  const userId = c.get("userId");
+  const dayBucket = Math.floor(Date.now() / 1000 / 86400);
+  const counts = await c.env.DB.batch([
+    c.env.DB.prepare(
+      `SELECT count FROM daily_usage_counters
+       WHERE user_id = ? AND app_id = 'mail'
+         AND limit_type = 'emails_per_day' AND day_bucket = ?`
+    ).bind(userId, dayBucket),
+    c.env.DB.prepare("SELECT COUNT(*) AS count FROM mail_templates WHERE user_id = ?").bind(userId),
+    c.env.DB.prepare("SELECT COUNT(*) AS count FROM mail_webhooks WHERE user_id = ?").bind(userId),
+    c.env.DB.prepare("SELECT COUNT(*) AS count FROM hme_aliases WHERE user_id = ?").bind(userId),
+    c.env.DB.prepare("SELECT COUNT(*) AS count FROM resource_grants WHERE user_id = ?").bind(userId),
+    c.env.DB.prepare(
+      `SELECT count FROM daily_usage_counters
+       WHERE user_id = ? AND app_id = 'verify'
+         AND limit_type = 'verification_attempts_per_day' AND day_bucket = ?`
+    ).bind(userId, dayBucket),
+    c.env.DB.prepare("SELECT COUNT(*) AS count FROM api_keys WHERE user_id = ?").bind(userId),
+  ]);
+  const limitTypes = Object.keys(LIMIT_DEFINITIONS) as Array<keyof typeof LIMIT_DEFINITIONS>;
+  const effectiveLimits = await Promise.all(
+    limitTypes.map((limitType) => getEffectiveLimit(c.env, userId, limitType))
+  );
+  return c.json(limitTypes.map((limitType, index) => {
+    const definition = LIMIT_DEFINITIONS[limitType];
+    const current = Number(
+      (counts[index].results[0] as { count?: number } | undefined)?.count ?? 0
+    );
+    return {
+      appId: definition.appId,
+      limitType,
+      limitValue: effectiveLimits[index],
+      currentValue: current,
+      remaining: Math.max(0, effectiveLimits[index] - current),
+      maximumValue: definition.maximumValue,
+      daily: definition.daily,
+    };
+  }));
+});
+
 me.get("/api-keys", async (c) => {
+  const page = pagination(c);
+  if (!page) return c.json({ error: "invalid-pagination" }, 400);
   const r = await c.env.DB
-    .prepare("SELECT id, app_id, name, status, scopes, expires_at, last_used_at, created_at FROM api_keys WHERE user_id = ?")
-    .bind(c.get("userId"))
+    .prepare("SELECT id, app_id, name, description, status, scopes, expires_at, last_used_at, created_at FROM api_keys WHERE user_id = ? ORDER BY created_at DESC, id LIMIT ? OFFSET ?")
+    .bind(c.get("userId"), page.limit, page.offset)
     .all();
-  return c.json(r.results);
+  return c.json(decodeJsonFields(r.results, ["scopes"]));
 });
 
 // Users may only create keys with scopes their own policy already grants.
 me.post("/api-keys", async (c) => {
   const userId = c.get("userId");
-  const body = await c.req.json<{ appId: string; name?: string; scopes: string[] }>();
+  const body = await c.req.json<{
+    appId: string;
+    name?: string;
+    description?: string;
+    scopes: string[];
+  }>().catch(() => null);
+  if (
+    !body
+    || !isNonEmptyString(body.appId, 63)
+    || !isStringArray(body.scopes)
+    || (body.name !== undefined && !isNonEmptyString(body.name, 100))
+    || (body.description !== undefined && (
+      typeof body.description !== "string" || body.description.length > 2_000
+    ))
+  ) {
+    return c.json({ error: "invalid-request-body" }, 400);
+  }
 
   const groupRows = await c.env.DB.prepare("SELECT group_id FROM group_members WHERE user_id = ?")
     .bind(userId)
@@ -309,49 +660,128 @@ me.post("/api-keys", async (c) => {
     .all<{ scopes: string }>();
 
   const allowedScopes = new Set<string>(policyRows.results.flatMap((p) => JSON.parse(p.scopes) as string[]));
-  const requestedScopes = body.scopes.filter((s) => allowedScopes.has(s));
+  const requestedScopes = [...new Set(body.scopes)];
 
-  if (requestedScopes.length === 0) {
-    return c.json({ error: "no-allowed-scopes" }, 403);
+  if (requestedScopes.some((scope) => !allowedScopes.has(scope))) {
+    return c.json({ error: "scope-not-allowed" }, 403);
   }
 
   const rawKey = `kitsos_${crypto.randomUUID().replace(/-/g, "")}`;
   const keyHash = await sha256Hex(rawKey);
   const keyId = id();
+  const apiKeyLimit = await prepareApiKeyCreation(c.env, userId);
+  if (apiKeyLimit === null) {
+    return c.json({ error: "api-key-creation-abuse-limit-exceeded" }, 429);
+  }
 
-  await c.env.DB.prepare(
-    "INSERT INTO api_keys (id, key_hash, user_id, app_id, name, status, scopes) VALUES (?, ?, ?, ?, ?, 'active', ?)"
+  const created = await c.env.DB.prepare(
+    `INSERT INTO api_keys
+       (id, key_hash, user_id, app_id, name, description, status, scopes)
+     SELECT ?, ?, ?, ?, ?, ?, 'active', ?
+     WHERE (
+       SELECT COUNT(*) FROM api_keys WHERE user_id = ?
+     ) < ?`
   )
-    .bind(keyId, keyHash, userId, body.appId, body.name ?? null, JSON.stringify(requestedScopes))
+    .bind(
+      keyId,
+      keyHash,
+      userId,
+      body.appId,
+      body.name ?? null,
+      body.description ?? null,
+      JSON.stringify(requestedScopes),
+      userId,
+      apiKeyLimit
+    )
     .run();
+  if (created.meta.changes !== 1) {
+    return c.json({ error: "api-key-limit-exceeded", limit: apiKeyLimit }, 429);
+  }
 
   return c.json({ id: keyId, key: rawKey, scopes: requestedScopes }, 201);
 });
 
 me.delete("/api-keys/:keyId", async (c) => {
-  await c.env.DB.prepare("UPDATE api_keys SET status = 'revoked' WHERE id = ? AND user_id = ?")
+  await invalidateApiKeyCache(c.env, c.req.param("keyId"));
+  await c.env.DB.prepare("DELETE FROM api_keys WHERE id = ? AND user_id = ?")
     .bind(c.req.param("keyId"), c.get("userId"))
     .run();
   return c.body(null, 204);
 });
 
 me.get("/limit-increase-requests", async (c) => {
+  const page = pagination(c);
+  if (!page) return c.json({ error: "invalid-pagination" }, 400);
   const r = await c.env.DB
-    .prepare("SELECT * FROM limit_increase_requests WHERE user_id = ? ORDER BY created_at DESC")
-    .bind(c.get("userId"))
+    .prepare("SELECT * FROM limit_increase_requests WHERE user_id = ? ORDER BY created_at DESC, id LIMIT ? OFFSET ?")
+    .bind(c.get("userId"), page.limit, page.offset)
     .all();
   return c.json(r.results);
 });
 
 me.post("/limit-increase-requests", async (c) => {
   const userId = c.get("userId");
-  const body = await c.req.json<{ appId: string; limitType: string; requestedValue: number; reason?: string }>();
-  const reqId = id();
-  await c.env.DB.prepare(
-    "INSERT INTO limit_increase_requests (id, user_id, app_id, limit_type, requested_value, reason) VALUES (?, ?, ?, ?, ?, ?)"
+  const body = await c.req.json<{ appId: string; limitType: string; requestedValue: number; reason?: string }>().catch(() => null);
+  if (
+    !body
+    || !isNonEmptyString(body.appId, 63)
+    || !isNonEmptyString(body.limitType, 100)
+    || !isValidLimitConfiguration(body.appId, body.limitType, body.requestedValue)
+    || (body.reason !== undefined && !isNonEmptyString(body.reason, 2000))
+  ) {
+    return c.json({ error: "invalid-request-body" }, 400);
+  }
+  const currentLimit = await getEffectiveLimit(c.env, userId, body.limitType);
+  if (body.requestedValue <= currentLimit) {
+    return c.json({ error: "requested-limit-must-be-higher", currentLimit }, 400);
+  }
+  const existing = await c.env.DB.prepare(
+    `SELECT 1 FROM limit_increase_requests
+     WHERE user_id = ? AND app_id = ? AND limit_type = ? AND status = 'pending'`
   )
-    .bind(reqId, userId, body.appId, body.limitType, body.requestedValue, body.reason ?? null)
-    .run();
+    .bind(userId, body.appId, body.limitType)
+    .first();
+  if (existing) return c.json({ error: "limit-request-already-pending" }, 409);
+  const withinHardRequestLimit = await consumeHardDailyLimit(
+    c.env,
+    userId,
+    "keys-api",
+    "limit_increase_requests_per_day",
+    10
+  );
+  if (!withinHardRequestLimit) {
+    return c.json({ error: "limit-request-abuse-limit-exceeded" }, 429);
+  }
+  const reqId = id();
+  try {
+    const created = await c.env.DB.prepare(
+      `INSERT INTO limit_increase_requests
+         (id, user_id, app_id, limit_type, requested_value, reason)
+       SELECT ?, ?, ?, ?, ?, ?
+       WHERE (
+         SELECT COUNT(*) FROM limit_increase_requests
+         WHERE user_id = ? AND status = 'pending'
+       ) < 5`
+    )
+      .bind(
+        reqId,
+        userId,
+        body.appId,
+        body.limitType,
+        body.requestedValue,
+        body.reason ?? null,
+        userId
+      )
+      .run();
+    if (created.meta.changes !== 1) {
+      return c.json({ error: "pending-limit-request-limit-exceeded", limit: 5 }, 429);
+    }
+  } catch (error) {
+    if (String(error).toLowerCase().includes("unique")) {
+      return c.json({ error: "limit-request-already-pending" }, 409);
+    }
+    throw error;
+  }
   return c.json({ id: reqId }, 201);
 });
 
@@ -359,5 +789,45 @@ app.route("/me", me);
 app.route("/analytics", analytics);
 
 app.get("/health", (c) => c.json({ ok: true }));
+app.notFound((c) => c.json({ error: "not-found" }, 404));
+app.onError((_error, c) => c.json({ error: "internal-error" }, 500));
 
-export default withTelemetry(app, "keys-api");
+const instrumented = withTelemetry(app, "keys-api");
+
+async function cleanupExpiredData(env: Env): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare(
+      "DELETE FROM api_keys WHERE expires_at IS NOT NULL AND expires_at <= unixepoch()"
+    ),
+    env.DB.prepare(
+      `DELETE FROM resource_verifications
+       WHERE verified_at IS NULL
+         AND token_expires_at IS NOT NULL
+         AND token_expires_at <= unixepoch()`
+    ),
+    env.DB.prepare(
+      `DELETE FROM resources
+       WHERE NOT EXISTS (
+         SELECT 1 FROM resource_verifications WHERE resource_id = resources.id
+       )
+         AND NOT EXISTS (
+           SELECT 1 FROM resource_grants WHERE resource_id = resources.id
+         )`
+    ),
+    env.DB.prepare(
+      `DELETE FROM daily_usage_counters
+       WHERE day_bucket <= CAST(unixepoch() / 86400 AS INTEGER) - 31`
+    ),
+  ]);
+}
+
+export default {
+  fetch: instrumented.fetch,
+  scheduled(
+    _controller: ScheduledController,
+    env: Env,
+    ctx: ExecutionContext
+  ): void {
+    ctx.waitUntil(cleanupExpiredData(env));
+  },
+};

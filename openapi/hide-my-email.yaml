@@ -1,0 +1,123 @@
+openapi: 3.0.3
+info:
+  title: Kitsos Hide My Email API
+  version: "1.0.0"
+  description: Manage forwarding aliases. Every destination address must have a current resource grant. Metadata bodies are limited to 64 KiB and inbound messages to 10 MiB.
+servers:
+  - url: https://hme.api.kitsos.net/v1
+
+components:
+  parameters:
+    PageLimit:
+      name: limit
+      in: query
+      schema: { type: integer, default: 100, minimum: 1, maximum: 500 }
+    PageOffset:
+      name: offset
+      in: query
+      schema: { type: integer, default: 0, minimum: 0, maximum: 100000 }
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: A Kitsos API key or a policy-scoped Clerk session.
+  schemas:
+    Alias:
+      type: object
+      required: [id, alias, domain, forward_to, status, emails_forwarded, created_at]
+      properties:
+        id: { type: string }
+        alias: { type: string }
+        domain: { type: string, example: hme.kitsos.net }
+        forward_to: { type: string, format: email, maxLength: 320 }
+        label: { type: string, nullable: true }
+        status: { type: string, enum: [active, disabled] }
+        emails_forwarded: { type: integer }
+        last_forwarded_at: { type: integer, nullable: true }
+        created_at: { type: integer }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+
+security:
+  - bearerAuth: []
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      security: []
+      responses:
+        "200": { description: OK }
+
+  /aliases:
+    get:
+      summary: List the caller's aliases
+      parameters:
+        - { $ref: "#/components/parameters/PageLimit" }
+        - { $ref: "#/components/parameters/PageOffset" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Alias" }
+    post:
+      summary: Create an alias
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [forwardTo]
+              properties:
+                forwardTo:
+                  type: string
+                  format: email
+                  maxLength: 320
+                  description: Must have a current email_address grant with hme:receive.
+                label: { type: string, maxLength: 200 }
+      responses:
+        "201": { description: Created }
+        "400":
+          description: Invalid request body
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403":
+          description: Destination address is not granted
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "429":
+          description: Rate or alias limit exceeded
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /aliases/{aliasId}:
+    parameters:
+      - { name: aliasId, in: path, required: true, schema: { type: string } }
+    patch:
+      summary: Update an alias
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string, enum: [active, disabled] }
+                label: { type: string, maxLength: 200 }
+                forwardTo: { type: string, format: email, maxLength: 320 }
+      responses:
+        "204": { description: Updated }
+        "400":
+          description: Invalid request body
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403":
+          description: Destination address is not granted
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    delete:
+      summary: Delete an alias
+      responses:
+        "204": { description: Deleted or already absent }

@@ -1,6 +1,6 @@
 {
   "name": "@kitsos/auth",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Shared auth library for Kitsos API workers: Clerk JWT validation, scope/policy/resource-grant checks, rate & usage limiting",
   "type": "module",
   "main": "src/index.ts",

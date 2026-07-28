@@ -1,6 +1,6 @@
 # verify
 
-`verify.api.kitsos.net` — resource ownership verification (DNS-TXT or
+`verify.api.kitsos.net/v1` — resource ownership verification (DNS-TXT or
 magic-link), the gate before any `resource_grants` row gets created.
 `dns-manager`, `hide-my-email`, etc. all check grants via
 `@kitsos/auth`'s `checkResourceGrant()` against what this worker
@@ -21,22 +21,19 @@ produces.
 
 **Magic link** (e.g. verifying an email address):
 
-1. `POST /resources` with `method: "magic_link"` → sends an email via
-   mail.api.kitsos.net with a confirm link
+1. `POST /resources` with `resourceType: "email_address"` and
+   `method: "magic_link"` → sends an email via mail.api.kitsos.net to
+   exactly the address supplied in `value`
 2. User clicks it → `GET /resources/:id/confirm?token=...` (public,
    no auth — the token itself is the credential) → marks verified +
    creates the grant
 3. Re-verification due after 90 days, 14-day grace period
 
+Magic-link tokens are stored only as SHA-256 hashes and expire after
+30 minutes. DNS challenges expire after 24 hours.
+
 ## Known gaps
 
-- `mail.ts`'s call to `mail.api.kitsos.net/send` is a **best-guess
-  contract** — mail.api.kitsos.net's actual OpenAPI spec doesn't exist
-  yet (see [[kitsos-mail-api]]), confirm the real payload shape before
-  relying on this in production
 - No cron job yet to warn users before `reverify_due_at` /
   auto-expire grants past `grace_expires_at` — that's the planned
   `cron` worker's job
-- No rate limiting on `/resources` POST — someone could hammer DNS
-  lookups; add via `@kitsos/auth`'s `checkRateLimit` before this is
-  public-facing beyond your own use

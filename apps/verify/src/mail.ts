@@ -16,7 +16,7 @@ export async function sendMagicLinkEmail(
   resourceValue: string
 ): Promise<{ ok: boolean; error?: string }> {
   try {
-    const res = await fetch("https://mail.api.kitsos.net/send", {
+    const res = await fetch("https://mail.api.kitsos.net/v1/send", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${env.MAIL_API_KEY}`,

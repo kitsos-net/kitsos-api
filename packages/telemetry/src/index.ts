@@ -1,4 +1,5 @@
 import { instrument, ResolveConfigFn } from "@microlabs/otel-cf-workers";
+import type { Attributes } from "@opentelemetry/api";
 
 export interface TelemetryEnv {
   AXIOM_TOKEN: string;
@@ -19,6 +20,18 @@ export function withTelemetry<Env extends TelemetryEnv>(
   handler: ExportedHandler<Env>,
   serviceName: string
 ) {
+  const redactUrl = (value: string): string => {
+    try {
+      const url = new URL(value);
+      for (const name of ["token", "key", "secret"]) {
+        if (url.searchParams.has(name)) url.searchParams.set(name, "[REDACTED]");
+      }
+      return url.toString();
+    } catch {
+      return value;
+    }
+  };
+
   const config: ResolveConfigFn = (env: Env) => ({
     exporter: {
       url: "https://api.axiom.co/v1/traces",
@@ -28,6 +41,20 @@ export function withTelemetry<Env extends TelemetryEnv>(
       },
     },
     service: { name: serviceName },
+    postProcessor: (spans) => spans.map((span) => {
+      const attributes = span.attributes as Attributes;
+      if (typeof attributes["url.full"] === "string") {
+        attributes["url.full"] = redactUrl(attributes["url.full"]);
+      }
+      if (typeof attributes["url.query"] === "string") {
+        const query = new URLSearchParams(attributes["url.query"].replace(/^\?/, ""));
+        for (const name of ["token", "key", "secret"]) {
+          if (query.has(name)) query.set(name, "[REDACTED]");
+        }
+        attributes["url.query"] = query.size > 0 ? `?${query}` : "";
+      }
+      return span;
+    }),
   });
 
   return instrument(handler, config);
