@@ -818,6 +818,9 @@ async function cleanupExpiredData(env: Env): Promise<void> {
       `DELETE FROM daily_usage_counters
        WHERE day_bucket <= CAST(unixepoch() / 86400 AS INTEGER) - 31`
     ),
+    env.DB.prepare(
+      "DELETE FROM request_rate_counters WHERE expires_at <= unixepoch()"
+    ),
   ]);
 }
 

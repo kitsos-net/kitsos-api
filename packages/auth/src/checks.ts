@@ -281,35 +281,55 @@ export async function checkResourceGrant(
 }
 
 /**
- * Fixed-window rate limiter backed by KV. Not perfectly precise at
- * window boundaries, but cheap — one KV read + occasional write per
- * request, well within Free Tier budget for a handful of concurrent
- * keys. Swap for a Durable Object if precision becomes necessary.
+ * Atomic fixed-window rate limiter backed by D1. KV is intentionally not used
+ * here: its free-tier write allowance is far below the platform's request
+ * allowance, so a KV write per request can make every protected route fail.
  */
 export async function checkRateLimit(
   env: Env,
   bucketKey: string,
   options: RateLimitOptions
 ): Promise<CheckResult> {
-  const windowStart = Math.floor(Date.now() / 1000 / options.windowSeconds);
-  const kvKey = `rl:${bucketKey}:${windowStart}`;
+  if (
+    bucketKey.length < 1
+    || bucketKey.length > 512
+    || !Number.isInteger(options.windowSeconds)
+    || options.windowSeconds < 1
+    || options.windowSeconds > 86_400
+    || !Number.isInteger(options.maxRequests)
+    || options.maxRequests < 1
+    || options.maxRequests > 1_000_000
+  ) {
+    return { allowed: false, status: 429, reason: "invalid-rate-limit-configuration" };
+  }
 
-  const current = await env.USAGE_COUNTERS.get(kvKey);
-  const count = current ? parseInt(current, 10) : 0;
+  const now = Math.floor(Date.now() / 1000);
+  const windowStart = Math.floor(now / options.windowSeconds) * options.windowSeconds;
+  const consumed = await env.DB.prepare(
+    `INSERT INTO request_rate_counters
+       (bucket_key, window_start, expires_at, count)
+     VALUES (?, ?, ?, 1)
+     ON CONFLICT(bucket_key, window_start)
+     DO UPDATE SET count = count + 1
+       WHERE count < ?
+     RETURNING count`
+  )
+    .bind(
+      bucketKey,
+      windowStart,
+      windowStart + options.windowSeconds,
+      options.maxRequests
+    )
+    .first<{ count: number }>();
 
-  if (count >= options.maxRequests) {
-    const elapsed = Math.floor(Date.now() / 1000) % options.windowSeconds;
+  if (!consumed) {
     return {
       allowed: false,
       status: 429,
       reason: "rate-limit-exceeded",
-      retryAfterSeconds: Math.max(1, options.windowSeconds - elapsed),
+      retryAfterSeconds: Math.max(1, windowStart + options.windowSeconds - now),
     };
   }
-
-  await env.USAGE_COUNTERS.put(kvKey, String(count + 1), {
-    expirationTtl: options.windowSeconds + 5,
-  });
 
   return { allowed: true, status: 200 };
 }
