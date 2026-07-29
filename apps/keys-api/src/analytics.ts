@@ -7,10 +7,11 @@ const MAX_LIMIT = 100;
 const DEFAULT_LIMIT = 10;
 const MAX_RANGE_SECONDS = 366 * 86400;
 
-function limit(value: string | undefined): number {
-  const parsed = Number(value ?? DEFAULT_LIMIT);
-  if (!Number.isInteger(parsed) || parsed < 1) return DEFAULT_LIMIT;
-  return Math.min(parsed, MAX_LIMIT);
+function limit(value: string | undefined): number | null {
+  if (value === undefined) return DEFAULT_LIMIT;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > MAX_LIMIT) return null;
+  return parsed;
 }
 
 function unixTime(value: string | undefined, fallback: number): number | null {
@@ -22,12 +23,21 @@ function unixTime(value: string | undefined, fallback: number): number | null {
 const analytics = new Hono<{ Bindings: Env; Variables: Vars }>();
 
 analytics.use("*", async (c, next) => {
+  if (!c.env.ADMIN_GROUP_ID) {
+    return c.json({ error: "analytics-auth-not-configured" }, 503);
+  }
   const auth = await authenticateApiKey(c.req.raw, c.env, "analytics:read", "analytics", {
     windowSeconds: 60,
     maxRequests: 120,
+  }, {
+    requiredGroupId: c.env.ADMIN_GROUP_ID,
   });
-  if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
+  if (!auth.allowed) {
+    return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429 | 503);
+  }
   c.set("userId", auth.context!.userId);
+  c.header("Cache-Control", "private, no-store");
+  c.header("Vary", "Authorization");
   await next();
 });
 
@@ -65,6 +75,7 @@ analytics.get("/overview", async (c) => {
 analytics.get("/top-users", async (c) => {
   const metric = c.req.query("metric") ?? "api_calls";
   const top = limit(c.req.query("limit"));
+  if (top === null) return c.json({ error: "invalid-limit" }, 400);
   const queries: Record<string, string> = {
     api_calls: `SELECT a.user_id AS userId, COALESCE(u.display_name, a.user_id) AS userName, COUNT(*) AS value
       FROM audit_log a LEFT JOIN users u ON u.id = a.user_id
@@ -92,6 +103,7 @@ analytics.get("/top-users", async (c) => {
 
 analytics.get("/top-apps", async (c) => {
   const top = limit(c.req.query("limit"));
+  if (top === null) return c.json({ error: "invalid-limit" }, 400);
   const rows = await c.env.DB.prepare(
     `SELECT a.app_id AS appId, COALESCE(p.name, a.app_id) AS appName, COUNT(*) AS value
      FROM audit_log a LEFT JOIN apps p ON p.id = a.app_id
