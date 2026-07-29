@@ -1,0 +1,1069 @@
+{
+  "id": null,
+  "uid": "kitsos-platform-overview",
+  "title": "Kitsos Platform Analytics",
+  "description": "Admin dashboard: durable product inventory from the Kitsos Analytics API and time-scoped API usage from Axiom.",
+  "tags": [
+    "kitsos",
+    "analytics",
+    "admin"
+  ],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "fiscalYearStartMonth": 0,
+  "liveNow": false,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Current product inventory",
+      "type": "stat",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "kitsos-analytics-api"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "kitsos-analytics-api"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "https://keys.api.kitsos.net/v1/analytics/overview",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "",
+          "columns": [
+            {
+              "selector": "usersActive",
+              "text": "Active users",
+              "type": "number"
+            },
+            {
+              "selector": "usersTotal",
+              "text": "Users total",
+              "type": "number"
+            },
+            {
+              "selector": "appsTotal",
+              "text": "Apps",
+              "type": "number"
+            },
+            {
+              "selector": "hmeAliasesActive",
+              "text": "Active HME aliases",
+              "type": "number"
+            },
+            {
+              "selector": "hmeAliasesTotal",
+              "text": "HME aliases total",
+              "type": "number"
+            },
+            {
+              "selector": "hmeEmailsForwardedTotal",
+              "text": "HME forwarded total",
+              "type": "number"
+            },
+            {
+              "selector": "verifiedResourcesTotal",
+              "text": "Verified resources",
+              "type": "number"
+            },
+            {
+              "selector": "mailTemplatesTotal",
+              "text": "Mail templates",
+              "type": "number"
+            },
+            {
+              "selector": "mailWebhooksTotal",
+              "text": "Mail webhooks",
+              "type": "number"
+            }
+          ],
+          "json_options": {
+            "columnar": false,
+            "root_is_not_array": true
+          }
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "description": "Current D1-backed state. These values are not affected by the dashboard time range."
+    },
+    {
+      "id": 2,
+      "title": "Authenticated API usage",
+      "type": "stat",
+      "datasource": {
+        "type": "axiomhq-axiom-datasource",
+        "uid": "kitsos-axiom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 16,
+        "x": 0,
+        "y": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "axiomhq-axiom-datasource",
+            "uid": "kitsos-axiom"
+          },
+          "apl": "['api-logs']\n| where ['kind'] == \"server\"\n| extend user_id=tostring(['attributes.custom']['kitsos.user.id']), status=toint(['attributes.http.response.status_code'])\n| where isnotempty(user_id) and isnotnull(status)\n| summarize requests=count(), successful=countif(status < 400), errors=countif(status >= 400), active_users=dcount(user_id)\n| extend success_rate=round(100.0 * todouble(successful) / requests, 2)",
+          "totals": false
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "success_rate"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          }
+        ]
+      },
+      "description": "Authenticated server requests in the selected time range. Anonymous requests and health checks are excluded."
+    },
+    {
+      "id": 3,
+      "title": "Product events in selected range",
+      "type": "stat",
+      "datasource": {
+        "type": "axiomhq-axiom-datasource",
+        "uid": "kitsos-axiom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "axiomhq-axiom-datasource",
+            "uid": "kitsos-axiom"
+          },
+          "apl": "['api-logs']\n| where ['kind'] == \"server\"\n| extend event_name=tostring(['attributes.custom']['kitsos.event.name']), outcome=tostring(['attributes.custom']['kitsos.event.outcome'])\n| where event_name == \"mail.message.send\" and outcome == \"success\"\n| summarize brevo_emails_sent=count()",
+          "totals": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "axiomhq-axiom-datasource",
+            "uid": "kitsos-axiom"
+          },
+          "apl": "['api-logs']\n| where ['kind'] == \"server\"\n| extend event_name=tostring(['attributes.custom']['kitsos.event.name']), outcome=tostring(['attributes.custom']['kitsos.event.outcome'])\n| where event_name == \"hme.email.forward\" and outcome == \"success\"\n| summarize hme_emails_forwarded=count()",
+          "totals": false
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "brevo_emails_sent"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Brevo emails sent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "hme_emails_forwarded"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "HME emails forwarded"
+              }
+            ]
+          }
+        ]
+      },
+      "description": "Successful semantic product events captured in Axiom during the selected time range."
+    },
+    {
+      "id": 4,
+      "title": "Authenticated requests by API",
+      "type": "timeseries",
+      "datasource": {
+        "type": "axiomhq-axiom-datasource",
+        "uid": "kitsos-axiom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "axiomhq-axiom-datasource",
+            "uid": "kitsos-axiom"
+          },
+          "apl": "['api-logs']\n| where ['kind'] == \"server\"\n| extend user_id=tostring(['attributes.custom']['kitsos.user.id']), api=tostring(['service.name']), status=toint(['attributes.http.response.status_code'])\n| where isnotempty(user_id) and isnotnull(status)\n| summarize requests=count() by bin_auto(['_time']), api\n| sort by ['_time'] asc",
+          "totals": false
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "sum"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 18,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "description": "Authenticated requests grouped by Kitsos Worker service and automatic time buckets."
+    },
+    {
+      "id": 5,
+      "title": "Errors by API",
+      "type": "timeseries",
+      "datasource": {
+        "type": "axiomhq-axiom-datasource",
+        "uid": "kitsos-axiom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "axiomhq-axiom-datasource",
+            "uid": "kitsos-axiom"
+          },
+          "apl": "['api-logs']\n| where ['kind'] == \"server\"\n| extend user_id=tostring(['attributes.custom']['kitsos.user.id']), api=tostring(['service.name']), status=toint(['attributes.http.response.status_code'])\n| where isnotempty(user_id) and status >= 400\n| summarize errors=count() by bin_auto(['_time']), api\n| sort by ['_time'] asc",
+          "totals": false
+        }
+      ],
+      "options": {
+        "legend": {
+          "calcs": [
+            "sum"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "continuous-RdYlGr"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 35,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 4,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "description": "HTTP responses with status 400 or higher, grouped by Kitsos Worker service."
+    },
+    {
+      "id": 6,
+      "title": "Top users by requests",
+      "type": "table",
+      "datasource": {
+        "type": "axiomhq-axiom-datasource",
+        "uid": "kitsos-axiom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "axiomhq-axiom-datasource",
+            "uid": "kitsos-axiom"
+          },
+          "apl": "['api-logs']\n| where ['kind'] == \"server\"\n| extend user_id=tostring(['attributes.custom']['kitsos.user.id']), status=toint(['attributes.http.response.status_code'])\n| where isnotempty(user_id) and isnotnull(status)\n| summarize requests=count(), errors=countif(status >= 400) by user_id\n| extend error_rate=round(100.0 * todouble(errors) / requests, 2)\n| top 10 by requests",
+          "totals": false
+        }
+      ],
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "error_rate"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          }
+        ]
+      },
+      "description": "Top authenticated users in the selected time range. User IDs are intentionally used instead of personal data."
+    },
+    {
+      "id": 7,
+      "title": "Top APIs by requests",
+      "type": "table",
+      "datasource": {
+        "type": "axiomhq-axiom-datasource",
+        "uid": "kitsos-axiom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "axiomhq-axiom-datasource",
+            "uid": "kitsos-axiom"
+          },
+          "apl": "['api-logs']\n| where ['kind'] == \"server\"\n| extend user_id=tostring(['attributes.custom']['kitsos.user.id']), api=tostring(['service.name']), status=toint(['attributes.http.response.status_code'])\n| where isnotempty(user_id) and isnotnull(status)\n| summarize requests=count(), errors=countif(status >= 400) by api\n| extend error_rate=round(100.0 * todouble(errors) / requests, 2)\n| top 10 by requests",
+          "totals": false
+        }
+      ],
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "error_rate"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          }
+        ]
+      },
+      "description": "Top Kitsos Worker services by authenticated request count in the selected time range."
+    },
+    {
+      "id": 8,
+      "title": "Top users by HME forwarding",
+      "type": "table",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "kitsos-analytics-api"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "kitsos-analytics-api"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "https://keys.api.kitsos.net/v1/analytics/top-users?metric=hme_emails_forwarded&limit=10",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "results",
+          "columns": [
+            {
+              "selector": "userName",
+              "text": "User",
+              "type": "string"
+            },
+            {
+              "selector": "value",
+              "text": "Value",
+              "type": "number"
+            }
+          ],
+          "json_options": {
+            "columnar": false,
+            "root_is_not_array": false
+          }
+        }
+      ],
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "description": "Cumulative forwarded-email counters stored on HME aliases, grouped by owner."
+    },
+    {
+      "id": 9,
+      "title": "HME aliases by user",
+      "type": "table",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "kitsos-analytics-api"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "kitsos-analytics-api"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "https://keys.api.kitsos.net/v1/analytics/top-users?metric=hme_aliases&limit=10",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "results",
+          "columns": [
+            {
+              "selector": "userName",
+              "text": "User",
+              "type": "string"
+            },
+            {
+              "selector": "value",
+              "text": "Value",
+              "type": "number"
+            }
+          ],
+          "json_options": {
+            "columnar": false,
+            "root_is_not_array": false
+          }
+        }
+      ],
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "Current HME alias inventory grouped by owner."
+    },
+    {
+      "id": 10,
+      "title": "Verified resources by user",
+      "type": "table",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "kitsos-analytics-api"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "kitsos-analytics-api"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "https://keys.api.kitsos.net/v1/analytics/top-users?metric=verified_resources&limit=10",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "results",
+          "columns": [
+            {
+              "selector": "userName",
+              "text": "User",
+              "type": "string"
+            },
+            {
+              "selector": "value",
+              "text": "Value",
+              "type": "number"
+            }
+          ],
+          "json_options": {
+            "columnar": false,
+            "root_is_not_array": false
+          }
+        }
+      ],
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "Currently valid verified resources grouped by owner."
+    },
+    {
+      "id": 11,
+      "title": "Mail templates by user",
+      "type": "table",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "kitsos-analytics-api"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "kitsos-analytics-api"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "https://keys.api.kitsos.net/v1/analytics/top-users?metric=mail_templates&limit=10",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "results",
+          "columns": [
+            {
+              "selector": "userName",
+              "text": "User",
+              "type": "string"
+            },
+            {
+              "selector": "value",
+              "text": "Value",
+              "type": "number"
+            }
+          ],
+          "json_options": {
+            "columnar": false,
+            "root_is_not_array": false
+          }
+        }
+      ],
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "Current mail template inventory grouped by owner."
+    },
+    {
+      "id": 12,
+      "title": "Authenticated request errors",
+      "type": "table",
+      "datasource": {
+        "type": "axiomhq-axiom-datasource",
+        "uid": "kitsos-axiom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "axiomhq-axiom-datasource",
+            "uid": "kitsos-axiom"
+          },
+          "apl": "['api-logs']\n| where ['kind'] == \"server\"\n| extend user_id=tostring(['attributes.custom']['kitsos.user.id']), api=tostring(['service.name']), method=tostring(['attributes.http.request.method']), path=tostring(['attributes.url.path']), status=toint(['attributes.http.response.status_code']), error_code=tostring(['attributes.custom']['error.code'])\n| where isnotempty(user_id) and status >= 400\n| summarize errors=count() by api, method, path, status, error_code, user_id\n| top 25 by errors",
+          "totals": false
+        }
+      ],
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "Most frequent authenticated HTTP errors in the selected time range."
+    }
+  ],
+  "refresh": "5m",
+  "schemaVersion": 41,
+  "style": "dark",
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "1m",
+      "5m",
+      "15m",
+      "30m",
+      "1h"
+    ],
+    "time_options": [
+      "6h",
+      "24h",
+      "7d",
+      "30d",
+      "90d",
+      "1y"
+    ]
+  },
+  "version": 1,
+  "weekStart": "monday"
+}

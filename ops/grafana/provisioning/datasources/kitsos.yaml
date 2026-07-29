@@ -1,0 +1,30 @@
+apiVersion: 1
+
+datasources:
+  - name: Kitsos Analytics API
+    uid: kitsos-analytics-api
+    orgId: 1
+    type: yesoreyeram-infinity-datasource
+    access: proxy
+    editable: false
+    jsonData:
+      allowedHosts:
+        - https://keys.api.kitsos.net
+      auth_method: none
+      httpHeaderName1: Authorization
+      timeoutInSeconds: 15
+    secureJsonData:
+      httpHeaderValue1: Bearer ${KITSOS_ANALYTICS_API_KEY}
+
+  - name: Kitsos Axiom
+    uid: kitsos-axiom
+    orgId: 1
+    type: axiomhq-axiom-datasource
+    access: proxy
+    editable: false
+    jsonData:
+      apiHost: https://api.axiom.co
+      orgID: ${AXIOM_ORG_ID}
+      edgeURL: ${AXIOM_EDGE_URL}
+    secureJsonData:
+      accessToken: ${AXIOM_GRAFANA_TOKEN}
