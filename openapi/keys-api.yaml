@@ -28,7 +28,7 @@ components:
       type: http
       scheme: bearer
       bearerFormat: API key
-      description: A `kitsos_...` API key for the `analytics` app with the `analytics:read` scope. Clerk JWTs are not accepted.
+      description: A `kitsos_...` API key for the `analytics` app with the `analytics:read` scope, owned by an active member of the configured admin group. Clerk JWTs and non-admin-owned keys are not accepted.
   schemas:
     App:
       type: object
@@ -535,7 +535,7 @@ paths:
       responses:
         "200": { description: Current counts for users, apps, HME aliases, resources, templates, and webhooks }
         "401": { description: Missing, invalid, or non-API-key credentials }
-        "403": { description: "Key is missing analytics:read" }
+        "403": { description: "Key is missing analytics:read or its owner is not an admin" }
 
   /analytics/top-users:
     get:

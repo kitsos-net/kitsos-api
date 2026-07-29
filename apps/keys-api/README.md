@@ -20,8 +20,11 @@ hash is stored.
 
 - `/analytics/*` — machine-to-machine endpoints for Grafana. They accept
   **only** a `kitsos_` API key for the `analytics` app with the
-  `analytics:read` scope; Clerk JWTs are rejected. The endpoints expose
-  fixed, aggregated queries and never accept raw SQL.
+  `analytics:read` scope whose owner is an active member of
+  `env.ADMIN_GROUP_ID`; Clerk JWTs and keys owned by non-admins are rejected.
+  Admin membership is checked against D1 on every request, so removal takes
+  effect immediately. The endpoints expose fixed, aggregated queries and
+  never accept raw SQL.
 
 ## Setup
 
@@ -77,8 +80,9 @@ Then set `ADMIN_GROUP_ID=admins` as a secret.
 | GET/POST | `/me/limit-increase-requests` | |
 
 Apply `packages/auth/0005_analytics.sql`, then create a policy and an API
-key for the Grafana service account under the `analytics` app. Configure
-Grafana's JSON/Infinity data source with `Authorization: Bearer kitsos_...`.
+key for a Grafana service account that is a member of `ADMIN_GROUP_ID` under
+the `analytics` app. Configure Grafana's JSON/Infinity data source with
+`Authorization: Bearer kitsos_...`.
 
 ## Not yet done
 

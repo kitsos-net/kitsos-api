@@ -151,7 +151,8 @@ export async function authenticateApiKey(
   env: Env,
   requiredScope: string,
   appId: string,
-  rateLimit: RateLimitOptions = DEFAULT_RATE_LIMIT
+  rateLimit: RateLimitOptions = DEFAULT_RATE_LIMIT,
+  authorization: { requiredGroupId?: string } = {},
 ): Promise<CheckResult & { context?: AuthContext }> {
   const authHeader = request.headers.get("Authorization") ?? "";
   const token = authHeader.replace(/^Bearer\s+/i, "");
@@ -180,6 +181,17 @@ export async function authenticateApiKey(
     return scopeCheck;
   }
 
+  if (
+    authorization.requiredGroupId !== undefined
+    && !authorization.requiredGroupId
+  ) {
+    return {
+      allowed: false,
+      status: 503,
+      reason: "required-group-not-configured",
+    };
+  }
+
   const rlCheck = await checkRateLimit(env, context.apiKeyId!, rateLimit);
   if (!rlCheck.allowed) {
     await writeAuditLog(env, {
@@ -191,6 +203,33 @@ export async function authenticateApiKey(
       reason: rlCheck.reason,
     });
     return rlCheck;
+  }
+
+  if (authorization.requiredGroupId !== undefined) {
+    // Resolve privileged membership from D1 on every request rather than
+    // trusting the cached AuthContext. Admin removal must take effect
+    // immediately, independently of the API-key cache TTL.
+    const membership = await env.DB.prepare(
+      `SELECT 1
+       FROM group_members gm
+       JOIN users u ON u.id = gm.user_id
+       WHERE gm.group_id = ? AND gm.user_id = ? AND u.status = 'active'
+       LIMIT 1`
+    )
+      .bind(authorization.requiredGroupId, context.userId)
+      .first();
+    if (!membership) {
+      const denied = { allowed: false, status: 403, reason: "not-admin" } as const;
+      await writeAuditLog(env, {
+        userId: context.userId,
+        appId,
+        apiKeyId: context.apiKeyId,
+        action: requiredScope,
+        result: "denied",
+        reason: denied.reason,
+      });
+      return denied;
+    }
   }
 
   await writeAuditLog(env, {
