@@ -22,12 +22,15 @@ criteria for introducing `/v2`.
 
 See `packages/auth/README.md` for the auth model. The database schema is
 defined by the ordered migrations `packages/auth/0001_init.sql` through
-`packages/auth/0009_request_rate_counters.sql`.
+`packages/auth/0011_verify_notify_sender.sql`.
 
 Migration 0006 invalidates pending legacy plaintext verification tokens;
 migration 0007 adds atomic product counters and retention; migration 0008
 registers the Utility API and its scopes; migration 0009 moves request-rate
-counters to atomic D1 rows so KV write exhaustion cannot take APIs offline.
+counters to atomic D1 rows so KV write exhaustion cannot take APIs offline;
+migration 0010 provisions the least-privileged Verify mail service principal,
+sender grant, template, and isolated mail quota; migration 0011 moves that
+sender to `verify@notify.kitsos.net`.
 
 See [`LIMITS.md`](./LIMITS.md) for hard abuse caps, adjustable product limits,
 and the proposed Cloudflare edge rule.

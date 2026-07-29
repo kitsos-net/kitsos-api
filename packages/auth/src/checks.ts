@@ -98,7 +98,7 @@ export async function validateApiKey(
 
   const cached = await env.AUTH_CACHE.get<
     AuthContext & { credentialExpiresAt?: number | null }
-  >(cacheKey, "json");
+  >(cacheKey, "json").catch(() => null);
   if (cached) {
     if (
       cached.credentialExpiresAt
@@ -176,12 +176,15 @@ export async function validateApiKey(
     groupIds,
   };
 
+  // Authentication must remain available when the optional KV cache reaches
+  // its daily write allowance. D1 is the source of truth; a failed cache write
+  // only makes this path less efficient and must not reject a valid key.
   await env.AUTH_CACHE.put(cacheKey, JSON.stringify({
     ...context,
     credentialExpiresAt: row.expires_at,
   }), {
     expirationTtl: AUTH_CACHE_TTL_SECONDS,
-  });
+  }).catch(() => {});
 
   // Fire-and-forget last_used_at update — not awaited to keep hot path fast
   env.DB.prepare("UPDATE api_keys SET last_used_at = unixepoch() WHERE id = ?")
