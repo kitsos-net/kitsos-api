@@ -16,6 +16,7 @@ import {
   acceptPrivateMcpDelegation,
   ensureUserRow,
   verifyClerkSession,
+  writeAuditLog,
 } from "@kitsos/auth";
 import { withTelemetry } from "@kitsos/telemetry";
 import { requireAdmin, requireUser } from "./middleware";
@@ -25,6 +26,10 @@ import type { Env } from "./env";
 
 type Vars = { userId: string };
 type KeyPermission = { appId: string; scopes: string[] };
+const CONSOLE_SESSION_APPS = new Set(["mail", "hide-my-email", "verify", "utility"]);
+const CONSOLE_SESSION_KEY_NAME = "API Console session";
+const CONSOLE_SESSION_KEY_DESCRIPTION = "Five-minute key issued by apidev.kitsos.net";
+const CONSOLE_SESSION_KEY_TTL_SECONDS = 5 * 60;
 const app = new Hono<{ Bindings: Env; Variables: Vars }>().basePath("/v1");
 
 app.use("*", async (c, next) => {
@@ -154,6 +159,30 @@ async function insertKeyPermissions(
   ));
 }
 
+async function getConsoleSessionPermissions(
+  env: Env,
+  userId: string,
+  appIds: string[],
+): Promise<KeyPermission[] | null> {
+  const permissions: KeyPermission[] = [];
+  for (const appId of appIds) {
+    const policy = await getPolicyScopes(env, userId, appId);
+    if (!policy) return null;
+    const catalog = await env.DB.prepare(
+      "SELECT scope FROM app_scopes WHERE app_id = ? ORDER BY scope"
+    )
+      .bind(appId)
+      .all<{ scope: string }>();
+    const allowedScopes = new Set(policy.scopes);
+    const scopes = catalog.results
+      .map((row) => row.scope)
+      .filter((scope) => allowedScopes.has(scope));
+    if (scopes.length === 0) return null;
+    permissions.push({ appId, scopes });
+  }
+  return permissions;
+}
+
 async function serializeApiKeys(
   env: Env,
   rows: Record<string, unknown>[],
@@ -232,7 +261,7 @@ admin.delete("/apps/:appId", async (c) => {
   const dependencies = await c.env.DB.batch([
     c.env.DB.prepare("SELECT 1 FROM app_scopes WHERE app_id = ? LIMIT 1").bind(appId),
     c.env.DB.prepare("SELECT 1 FROM policies WHERE app_id = ? LIMIT 1").bind(appId),
-    c.env.DB.prepare("SELECT 1 FROM api_keys WHERE app_id = ? LIMIT 1").bind(appId),
+    c.env.DB.prepare("SELECT 1 FROM api_key_apps WHERE app_id = ? LIMIT 1").bind(appId),
     c.env.DB.prepare("SELECT 1 FROM resources WHERE app_id = ? LIMIT 1").bind(appId),
   ]);
   if (dependencies.some((result) => result.results.length > 0)) {
@@ -697,7 +726,11 @@ me.get("/limits", async (c) => {
        WHERE user_id = ? AND app_id = 'verify'
          AND limit_type = 'verification_attempts_per_day' AND day_bucket = ?`
     ).bind(userId, dayBucket),
-    c.env.DB.prepare("SELECT COUNT(*) AS count FROM api_keys WHERE user_id = ?").bind(userId),
+    c.env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM api_keys
+       WHERE user_id = ? AND status = 'active'
+         AND (expires_at IS NULL OR expires_at > unixepoch())`
+    ).bind(userId),
   ]);
   const limitTypes = Object.keys(LIMIT_DEFINITIONS) as Array<keyof typeof LIMIT_DEFINITIONS>;
   const effectiveLimits = await Promise.all(
@@ -718,6 +751,100 @@ me.get("/limits", async (c) => {
       daily: definition.daily,
     };
   }));
+});
+
+me.post("/session-api-key", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json<{ appIds?: unknown }>().catch(() => null);
+  if (
+    !body
+    || !Array.isArray(body.appIds)
+    || body.appIds.length < 1
+    || body.appIds.length > CONSOLE_SESSION_APPS.size
+    || !body.appIds.every((appId) =>
+      isNonEmptyString(appId, 63) && CONSOLE_SESSION_APPS.has(appId)
+    )
+  ) {
+    return c.json({ error: "invalid-request-body" }, 400);
+  }
+  const appIds = [...new Set(body.appIds as string[])];
+  if (appIds.length !== body.appIds.length) {
+    return c.json({ error: "duplicate-app-id" }, 400);
+  }
+
+  const permissions = await getConsoleSessionPermissions(c.env, userId, appIds);
+  if (!permissions) {
+    return c.json({
+      error: "scope-not-allowed",
+      message: "At least one selected app has no scopes granted by your policy.",
+    }, 403);
+  }
+
+  const apiKeyLimit = await prepareApiKeyCreation(c.env, userId);
+  if (apiKeyLimit === null) {
+    return c.json({ error: "api-key-creation-abuse-limit-exceeded" }, 429);
+  }
+
+  const previousKeys = await c.env.DB.prepare(
+    `SELECT id FROM api_keys
+     WHERE user_id = ? AND name = ? AND description = ?
+       AND expires_at IS NOT NULL`
+  )
+    .bind(userId, CONSOLE_SESSION_KEY_NAME, CONSOLE_SESSION_KEY_DESCRIPTION)
+    .all<{ id: string }>();
+  await Promise.all(previousKeys.results.map((key) =>
+    invalidateApiKeyCache(c.env, key.id)
+  ));
+  await c.env.DB.prepare(
+    `DELETE FROM api_keys
+     WHERE user_id = ? AND name = ? AND description = ?
+       AND expires_at IS NOT NULL`
+  )
+    .bind(userId, CONSOLE_SESSION_KEY_NAME, CONSOLE_SESSION_KEY_DESCRIPTION)
+    .run();
+
+  const rawKey = `kitsos_${crypto.randomUUID().replace(/-/g, "")}`;
+  const keyHash = await sha256Hex(rawKey);
+  const keyId = id();
+  const expiresAt = Math.floor(Date.now() / 1000) + CONSOLE_SESSION_KEY_TTL_SECONDS;
+  const created = await c.env.DB.prepare(
+    `INSERT INTO api_keys
+       (id, key_hash, user_id, app_id, name, description, status, scopes, expires_at)
+     SELECT ?, ?, ?, ?, ?, ?, 'active', ?, ?
+     WHERE (
+       SELECT COUNT(*) FROM api_keys WHERE user_id = ?
+     ) < ?`
+  )
+    .bind(
+      keyId,
+      keyHash,
+      userId,
+      permissions[0].appId,
+      CONSOLE_SESSION_KEY_NAME,
+      CONSOLE_SESSION_KEY_DESCRIPTION,
+      JSON.stringify(permissions.flatMap((permission) => permission.scopes)),
+      expiresAt,
+      userId,
+      apiKeyLimit,
+    )
+    .run();
+  if (created.meta.changes !== 1) {
+    return c.json({ error: "api-key-limit-exceeded", limit: apiKeyLimit }, 429);
+  }
+  try {
+    await insertKeyPermissions(c.env, keyId, permissions);
+  } catch (error) {
+    await c.env.DB.prepare("DELETE FROM api_keys WHERE id = ?").bind(keyId).run();
+    throw error;
+  }
+  await writeAuditLog(c.env, {
+    userId,
+    appId: "keys-api",
+    apiKeyId: keyId,
+    action: "session_api_key.create",
+    result: "allowed",
+  });
+  return c.json({ id: keyId, key: rawKey, permissions, expiresAt }, 201);
 });
 
 me.get("/api-keys", async (c) => {
