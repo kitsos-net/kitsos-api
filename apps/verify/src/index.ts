@@ -220,12 +220,14 @@ async function deleteResourceOwnership(
            SELECT id FROM api_keys WHERE user_id = ?
          )` : ""}`
     ).bind(resourceId, ...(userId ? [userId] : [])),
+    // Grants reference their verification. Delete them first so D1 can enforce
+    // the foreign key instead of turning a valid ownership deletion into a 500.
     env.DB.prepare(
-      `DELETE FROM resource_verifications
+      `DELETE FROM resource_grants
        WHERE resource_id = ? ${userId ? "AND user_id = ?" : ""}`
     ).bind(resourceId, ...(userId ? [userId] : [])),
     env.DB.prepare(
-      `DELETE FROM resource_grants
+      `DELETE FROM resource_verifications
        WHERE resource_id = ? ${userId ? "AND user_id = ?" : ""}`
     ).bind(resourceId, ...(userId ? [userId] : [])),
     env.DB.prepare(
