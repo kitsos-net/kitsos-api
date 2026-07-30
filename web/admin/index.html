@@ -81,6 +81,7 @@ const PANELS = {
                  { key: "name", label: "Name (optional)", type: "text" },
                  { key: "scopes", label: "Scopes (Komma-getrennt)", type: "list", required: true },
                ],
+               rotate: (row) => `/admin/api-keys/${row.id}/rotate`,
                del: (row) => `/admin/api-keys/${row.id}` },
   limits:    { label: "Usage Limits", list: "/admin/usage-limits", create: "/admin/usage-limits",
                fields: [
@@ -166,9 +167,10 @@ function renderTable(rows) {
   if (!rows || rows.length === 0) return "<p class='hint'>Keine Einträge.</p>";
   const cols = Object.keys(rows[0]);
   const panel = PANELS[activePanel];
-  let html = "<table><thead><tr>" + cols.map(c => `<th>${c}</th>`).join("") + (panel.del ? "<th></th>" : "") + "</tr></thead><tbody>";
+  let html = "<table><thead><tr>" + cols.map(c => `<th>${c}</th>`).join("") + (panel.rotate ? "<th>Rotation</th>" : "") + (panel.del ? "<th></th>" : "") + "</tr></thead><tbody>";
   for (const row of rows) {
     html += "<tr>" + cols.map(c => `<td>${row[c] === null || row[c] === undefined ? "" : String(row[c])}</td>`).join("");
+    if (panel.rotate) html += `<td><button class="action rotate" data-id="${row.id}">rotieren</button></td>`;
     if (panel.del) html += `<td><button class="danger" data-id="${row.id}">löschen</button></td>`;
     html += "</tr>";
   }
@@ -198,6 +200,21 @@ async function render() {
       if (!confirm(`${row.id} wirklich löschen?`)) return;
       await authedFetch(panel.del(row), { method: "DELETE" });
       render();
+    };
+  });
+  main.querySelectorAll("button.rotate").forEach((btn) => {
+    btn.onclick = async () => {
+      const row = { id: btn.dataset.id };
+      if (!confirm(`${row.id} jetzt rotieren? Der alte Raw Key wird sofort ungültig.`)) return;
+      const res = await authedFetch(panel.rotate(row), { method: "POST" });
+      const json = await res.json().catch(() => ({}));
+      await render();
+      const out = document.getElementById("createOut");
+      if (out) {
+        out.textContent = res.ok
+          ? `HTTP ${res.status}: ${JSON.stringify(json)} — Raw Key jetzt sicher speichern; er wird nicht erneut angezeigt.`
+          : `HTTP ${res.status}: ${JSON.stringify(json)}`;
+      }
     };
   });
 

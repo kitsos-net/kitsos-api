@@ -159,6 +159,106 @@ async function insertKeyPermissions(
   ));
 }
 
+async function rotateApiKey(
+  env: Env,
+  keyId: string,
+  ownerId?: string,
+): Promise<
+  | { ok: true; id: string; key: string; permissions: KeyPermission[]; expiresAt?: number }
+  | { ok: false; reason: "not-found" | "creation-limit" | "conflict" }
+> {
+  const ownerClause = ownerId ? "AND k.user_id = ?" : "";
+  const oldKey = await env.DB.prepare(
+    `SELECT k.user_id, k.expires_at
+     FROM api_keys k
+     WHERE k.id = ? ${ownerClause}
+       AND k.status = 'active'
+       AND (k.expires_at IS NULL OR k.expires_at > unixepoch())`
+  )
+    .bind(keyId, ...(ownerId ? [ownerId] : []))
+    .first<{ user_id: string; expires_at: number | null }>();
+  if (!oldKey) return { ok: false, reason: "not-found" };
+
+  const permissionRows = await env.DB.prepare(
+    `SELECT app_id, scopes
+     FROM api_key_apps
+     WHERE api_key_id = ?
+     ORDER BY app_id`
+  )
+    .bind(keyId)
+    .all<{ app_id: string; scopes: string }>();
+  if (permissionRows.results.length === 0) {
+    return { ok: false, reason: "conflict" };
+  }
+  const permissions = permissionRows.results.map((row) => ({
+    appId: row.app_id,
+    scopes: JSON.parse(row.scopes) as string[],
+  }));
+
+  // Rotation creates new secret material, so it shares the non-overridable
+  // daily churn budget with normal key creation. It is a one-for-one
+  // replacement and therefore cannot bypass the stored-key product limit.
+  const withinHardCreationLimit = await consumeHardDailyLimit(
+    env,
+    oldKey.user_id,
+    "keys-api",
+    "api_key_creations_per_day",
+    100
+  );
+  if (!withinHardCreationLimit) return { ok: false, reason: "creation-limit" };
+
+  const rawKey = `kitsos_${crypto.randomUUID().replace(/-/g, "")}`;
+  const keyHash = await sha256Hex(rawKey);
+  const replacementId = id();
+  const statements = await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO api_keys
+         (id, key_hash, user_id, app_id, name, description, status, scopes,
+          expires_at, auto_roll_at)
+       SELECT ?, ?, user_id, app_id, name, description, 'active', scopes,
+              expires_at, auto_roll_at
+       FROM api_keys
+       WHERE id = ? ${ownerId ? "AND user_id = ?" : ""}
+         AND status = 'active'
+         AND (expires_at IS NULL OR expires_at > unixepoch())`
+    ).bind(replacementId, keyHash, keyId, ...(ownerId ? [ownerId] : [])),
+    env.DB.prepare(
+      `INSERT INTO api_key_apps (api_key_id, app_id, scopes)
+       SELECT ?, a.app_id, a.scopes
+       FROM api_key_apps a
+       JOIN api_keys old_key ON old_key.id = a.api_key_id
+       JOIN api_keys replacement ON replacement.id = ?
+       WHERE a.api_key_id = ? AND old_key.status = 'active'`
+    ).bind(replacementId, replacementId, keyId),
+    env.DB.prepare(
+      `UPDATE api_keys
+       SET status = 'revoked'
+       WHERE id = ? ${ownerId ? "AND user_id = ?" : ""}
+         AND status = 'active'
+         AND EXISTS (SELECT 1 FROM api_keys WHERE id = ?)`
+    ).bind(keyId, ...(ownerId ? [ownerId] : []), replacementId),
+  ]);
+  if (statements[0].meta.changes !== 1 || statements[2].meta.changes !== 1) {
+    return { ok: false, reason: "conflict" };
+  }
+
+  // Cached requests independently re-check D1 status, so failures in the
+  // optional KV cleanup cannot make the revoked credential usable or prevent
+  // the one-time raw replacement key from being returned.
+  await invalidateApiKeyCache(env, keyId).catch(() => {});
+  await env.DB.prepare("DELETE FROM api_keys WHERE id = ? AND status = 'revoked'")
+    .bind(keyId)
+    .run()
+    .catch(() => {});
+  return {
+    ok: true,
+    id: replacementId,
+    key: rawKey,
+    permissions,
+    ...(oldKey.expires_at ? { expiresAt: oldKey.expires_at } : {}),
+  };
+}
+
 async function getConsoleSessionPermissions(
   env: Env,
   userId: string,
@@ -564,6 +664,27 @@ admin.delete("/api-keys/:keyId", async (c) => {
   return c.body(null, 204);
 });
 
+admin.post("/api-keys/:keyId/rotate", async (c) => {
+  const keyId = c.req.param("keyId");
+  const result = await rotateApiKey(c.env, keyId);
+  if (!result.ok) {
+    if (result.reason === "not-found") return c.json({ error: "not-found" }, 404);
+    if (result.reason === "creation-limit") {
+      return c.json({ error: "api-key-creation-abuse-limit-exceeded" }, 429);
+    }
+    return c.json({ error: "api-key-rotation-conflict" }, 409);
+  }
+  await writeAuditLog(c.env, {
+    userId: c.get("userId"),
+    appId: "keys-api",
+    apiKeyId: result.id,
+    action: "api_key.rotate.admin",
+    result: "allowed",
+    reason: `replaced:${keyId}`,
+  });
+  return c.json(result, 201);
+});
+
 // --- Usage limits ---
 admin.get("/usage-limits", async (c) => {
   const page = pagination(c);
@@ -939,6 +1060,28 @@ me.delete("/api-keys/:keyId", async (c) => {
   return c.body(null, 204);
 });
 
+me.post("/api-keys/:keyId/rotate", async (c) => {
+  const keyId = c.req.param("keyId");
+  const userId = c.get("userId");
+  const result = await rotateApiKey(c.env, keyId, userId);
+  if (!result.ok) {
+    if (result.reason === "not-found") return c.json({ error: "not-found" }, 404);
+    if (result.reason === "creation-limit") {
+      return c.json({ error: "api-key-creation-abuse-limit-exceeded" }, 429);
+    }
+    return c.json({ error: "api-key-rotation-conflict" }, 409);
+  }
+  await writeAuditLog(c.env, {
+    userId,
+    appId: "keys-api",
+    apiKeyId: result.id,
+    action: "api_key.rotate",
+    result: "allowed",
+    reason: `replaced:${keyId}`,
+  });
+  return c.json(result, 201);
+});
+
 me.get("/limit-increase-requests", async (c) => {
   const page = pagination(c);
   if (!page) return c.json({ error: "invalid-pagination" }, 400);
@@ -1027,7 +1170,9 @@ const instrumented = withTelemetry(app, "keys-api");
 async function cleanupExpiredData(env: Env): Promise<void> {
   await env.DB.batch([
     env.DB.prepare(
-      "DELETE FROM api_keys WHERE expires_at IS NOT NULL AND expires_at <= unixepoch()"
+      `DELETE FROM api_keys
+       WHERE status = 'revoked'
+          OR (expires_at IS NOT NULL AND expires_at <= unixepoch())`
     ),
     env.DB.prepare(
       `DELETE FROM resource_verifications
@@ -1042,6 +1187,9 @@ async function cleanupExpiredData(env: Env): Promise<void> {
        )
          AND NOT EXISTS (
            SELECT 1 FROM resource_grants WHERE resource_id = resources.id
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM api_key_resource_grants WHERE resource_id = resources.id
          )`
     ),
     env.DB.prepare(

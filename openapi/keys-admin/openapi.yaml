@@ -83,6 +83,17 @@ paths:
     post: { tags: [Admin], summary: Create an API key for any user, requestBody: { required: true, content: { application/json: { schema: { type: object, required: [userId], properties: { userId: { type: string, maxLength: 100 }, appId: { type: string, maxLength: 63 }, name: { type: string, maxLength: 100 }, description: { type: string, maxLength: 2000 }, scopes: { type: array, minItems: 1, maxItems: 100, items: { type: string, maxLength: 100 } }, permissions: { type: array, minItems: 1, maxItems: 20, items: { $ref: '#/components/schemas/KeyPermission' } }, expiresAt: { type: integer } }, oneOf: [{ required: [permissions] }, { required: [appId, scopes] }] } } } }, responses: { "201": { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/ApiKeyCreated' } } } } } }
   /admin/api-keys/{keyId}:
     delete: { tags: [Admin], summary: Revoke an API key, parameters: [{ name: keyId, in: path, required: true, schema: { type: string } }], responses: { "204": { description: No Content } } }
+  /admin/api-keys/{keyId}/rotate:
+    post:
+      tags: [Admin]
+      summary: Rotate an active API key without changing its permissions or metadata
+      description: Atomically creates a one-for-one replacement, revokes the old credential, and returns the new raw key only once. Rotation consumes the hard daily key-creation churn budget.
+      parameters: [{ name: keyId, in: path, required: true, schema: { type: string } }]
+      responses:
+        "201": { description: Rotated, content: { application/json: { schema: { $ref: '#/components/schemas/ApiKeyCreated' } } } }
+        "404": { description: Key not found, revoked, or expired }
+        "409": { description: Concurrent change or missing canonical permissions }
+        "429": { description: Hard daily key-creation churn limit exceeded }
   /admin/usage-limits:
     get: { tags: [Admin], summary: List usage limits, parameters: [{ name: userId, in: query, schema: { type: string } }], responses: { "200": { description: OK } } }
     post: { tags: [Admin], summary: Set a usage limit, requestBody: { required: true, content: { application/json: { schema: { type: object, required: [userId, appId, limitType, limitValue], properties: { userId: { type: string }, appId: { type: string }, limitType: { type: string }, limitValue: { type: integer }, isOverride: { type: boolean } } } } } }, responses: { "201": { description: Created } } }

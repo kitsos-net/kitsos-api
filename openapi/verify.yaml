@@ -5,10 +5,9 @@ info:
     Resource ownership verification (DNS-TXT or magic link) — the gate
     before any resource_grants row gets created. Every route except
     the health check and the magic-link confirm endpoint requires a
-    Clerk session (no API-key auth path — verification is a human,
-    in-browser action). Magic links are sent only to the email address
-    being verified and expire after 30 minutes; DNS challenges expire
-    after 24 hours.
+    Clerk session, a scoped Verify API key, or a private MCP delegation.
+    Magic links are sent only to the email address being verified and
+    expire after 30 minutes; DNS challenges expire after 24 hours.
   version: "1.0.0"
 servers:
   - url: https://verify.api.kitsos.net/v1
@@ -137,6 +136,25 @@ paths:
           description: Verification attempt expired during confirmation
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
 
+  /resources/{resourceId}:
+    delete:
+      summary: Delete your own verification history and grant for a resource
+      description: >
+        Removes only the authenticated user's verification rows, grant, and
+        legacy API-key resource links. A shared resource row remains while
+        another user still owns it. Returns 409 while one of the caller's mail
+        webhooks uses the address as a sender or an HME alias uses it as a
+        destination; delete or reconfigure those objects first. This operation
+        never cascades into product objects.
+      parameters:
+        - { name: resourceId, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Ownership records deleted }
+        "404": { description: No resource ownership belonging to the caller }
+        "409":
+          description: Resource is still used by a mail webhook or HME alias
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
   /resources/{resourceId}/confirm:
     get:
       summary: Confirm a magic-link verification (public — the token itself is the credential, no Clerk session required)
@@ -162,8 +180,11 @@ paths:
 
   /admin/resources/{resourceId}:
     delete:
-      summary: Delete a resource and its verifications/grants (admin only)
+      summary: Delete a resource and all ownership rows (admin only)
+      description: Uses the same no-cascade conflict rule as self-service deletion and returns 409 while any mail webhook or HME alias depends on the resource.
       parameters:
         - { name: resourceId, in: path, required: true, schema: { type: string } }
       responses:
         "204": { description: No Content }
+        "404": { description: Resource not found }
+        "409": { description: Resource is still in use }
