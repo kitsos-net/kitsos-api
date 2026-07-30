@@ -25,7 +25,7 @@ criteria for introducing `/v2`.
 
 See `packages/auth/README.md` for the auth model. The database schema is
 defined by the ordered migrations `packages/auth/0001_init.sql` through
-`packages/auth/0014_mcp_connections.sql`.
+`packages/auth/0015_key_rotation_and_resource_deletion.sql`.
 
 Migration 0006 invalidates pending legacy plaintext verification tokens;
 migration 0007 adds atomic product counters and retention; migration 0008

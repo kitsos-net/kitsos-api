@@ -2,7 +2,7 @@
   "name": "kitsos-api-monorepo",
   "private": true,
   "scripts": {
-    "check": "npx tsc -p packages/auth/tsconfig.json --noEmit && npx tsc -p apps/keys-api/tsconfig.json --noEmit && npx tsc -p apps/verify/tsconfig.json --noEmit",
+    "check": "tsc -p packages/auth/tsconfig.json --noEmit && tsc -p apps/keys-api/tsconfig.json --noEmit && tsc -p apps/verify/tsconfig.json --noEmit",
     "test": "npm run check && sh tests/security-invariants.sh"
   },
   "workspaces": [
