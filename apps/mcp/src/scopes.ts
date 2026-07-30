@@ -1,4 +1,5 @@
 import { expandScopes, getMcpPolicyScopes } from "@kitsos/auth";
+import { configuredScopes } from "./connections";
 import type { Env, McpProps } from "./env";
 
 export type AccessType = "read" | "write" | "send";
@@ -134,9 +135,16 @@ export async function exposableScopeIds(env: Env): Promise<Set<string>> {
 export async function effectiveMcpScopes(
   env: Env,
   userId: string,
+  delegationId: string,
   grantedScopes: string[],
 ): Promise<Set<string>> {
-  const granted = new Set(expandScopes(grantedScopes));
+  const configured = await configuredScopes(
+    env,
+    userId,
+    delegationId,
+    grantedScopes,
+  );
+  const granted = new Set(expandScopes(configured));
   const effective = new Set<string>();
   const exposable = await exposableScopeIds(env);
   const appIds = [...new Set(SCOPE_CATALOG.map((scope) => scope.appId))];

@@ -3,6 +3,21 @@ import {
   expandScopes,
   getMcpPolicyScopes,
 } from "@kitsos/auth";
+import {
+  connectionRows,
+  createConnection,
+  delegationIdFromGrant,
+  deleteConnection,
+  MAX_CONNECTED_APPS,
+  MAX_CLIENT_NAME_LENGTH,
+  MAX_DESCRIPTION_LENGTH,
+  normalizeClientName,
+  normalizeDescription,
+  reconcileConnections,
+  syncConnections,
+  updateConnection,
+  validScopeSelection,
+} from "./connections";
 import type { Env, McpProps } from "./env";
 import {
   SCOPE_BY_ID,
@@ -112,6 +127,15 @@ async function authorizePage(request: Request, env: Env): Promise<Response> {
   const oauthRequest = await env.OAUTH_PROVIDER.parseAuthRequest(request);
   const client = await env.OAUTH_PROVIDER.lookupClient(oauthRequest.clientId);
   if (!client) return errorResponse(new Error("Unbekannter OAuth-Client."), 400);
+  if (
+    client.clientId.length > 256
+    || (
+      client.clientName !== undefined
+      && [...client.clientName].length > MAX_CLIENT_NAME_LENGTH
+    )
+  ) {
+    return errorResponse(new Error("Die OAuth-App enthält zu lange Metadaten."), 400);
+  }
   if (oauthRequest.scope.some((scope) => !SCOPE_BY_ID.has(scope))) {
     return errorResponse(new Error("Der Client hat eine nicht unterstützte Berechtigung angefragt."), 400);
   }
@@ -158,6 +182,9 @@ async function consentContext(request: Request, env: Env): Promise<Response> {
       ...scope,
       preselected: scope.accessType === "read",
     })),
+    limits: {
+      descriptionLength: MAX_DESCRIPTION_LENGTH,
+    },
   });
 }
 
@@ -166,7 +193,11 @@ async function approveConsent(request: Request, env: Env): Promise<Response> {
   const [stored, userId, body] = await Promise.all([
     readConsentState(request, env),
     currentUser(request, env),
-    request.json<{ csrf?: string; scopes?: unknown }>().catch(() => null),
+    request.json<{
+      csrf?: string;
+      scopes?: unknown;
+      description?: unknown;
+    }>().catch(() => null),
   ]);
   if (!userId) return json({ error: "not-authenticated" }, 401);
   if (!stored) return json({ error: "authorization-expired" }, 410);
@@ -185,25 +216,51 @@ async function approveConsent(request: Request, env: Env): Promise<Response> {
   if (!selected.length || selected.some((scope) => !availableIds.has(scope))) {
     return json({ error: "invalid-scope-selection" }, 400);
   }
+  const description = normalizeDescription(body.description);
+  const grants = await env.OAUTH_PROVIDER.listUserGrants(userId, { limit: 100 });
+  await reconcileConnections(env, userId, grants.items);
 
   const delegationId = crypto.randomUUID();
+  const clientName = normalizeClientName(stored.state.client.clientName);
+  const created = await createConnection(env, {
+    userId,
+    clientId: stored.state.client.clientId,
+    clientName,
+    delegationId,
+    description,
+    scopes: selected,
+  });
+  if (!created) {
+    return json({
+      error: "connected-app-limit-exceeded",
+      message: `Du kannst höchstens ${MAX_CONNECTED_APPS} Apps gleichzeitig verbinden.`,
+      limit: MAX_CONNECTED_APPS,
+    }, 409);
+  }
   const props: McpProps = {
     userId,
     clientId: stored.state.client.clientId,
     delegationId,
     scopes: selected,
   };
-  const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
-    request: stored.state.request,
-    userId,
-    metadata: {
-      clientName: stored.state.client.clientName || "Unbenannte App",
-      delegationId,
-      scopes: selected,
-    },
-    scope: selected,
-    props,
-  });
+  let redirectTo: string;
+  try {
+    const result = await env.OAUTH_PROVIDER.completeAuthorization({
+      request: stored.state.request,
+      userId,
+      metadata: {
+        clientName: clientName || "Unbenannte App",
+        delegationId,
+        scopes: selected,
+      },
+      scope: selected,
+      props,
+    });
+    redirectTo = result.redirectTo;
+  } catch (error) {
+    await deleteConnection(env, userId, delegationId);
+    throw error;
+  }
   await env.OAUTH_KV.delete(stored.key);
   return json({ redirectTo }, 200, {
     "Set-Cookie": consentCookie("", 0),
@@ -242,16 +299,87 @@ async function connectionsContext(request: Request, env: Env): Promise<Response>
   const userId = await currentUser(request, env);
   if (!userId) return json({ error: "not-authenticated" }, 401);
   const result = await env.OAUTH_PROVIDER.listUserGrants(userId, { limit: 100 });
+  await reconcileConnections(env, userId, result.items);
+  const rows = await connectionRows(env, userId);
+  const rowsByDelegation = new Map(rows.map((row) => [row.delegation_id, row]));
   return json({
-    connections: result.items.map((grant) => ({
-      id: grant.id,
-      clientId: grant.clientId,
-      clientName: typeof grant.metadata?.clientName === "string"
-        ? grant.metadata.clientName
-        : undefined,
-      scopeCount: expandScopes(grant.scope).length,
-      createdAt: grant.createdAt,
-    })),
+    connections: result.items.flatMap((grant) => {
+      const delegationId = delegationIdFromGrant(grant);
+      if (!delegationId) return [];
+      const row = rowsByDelegation.get(delegationId);
+      let configured = grant.scope.filter((scope) => SCOPE_BY_ID.has(scope));
+      if (row) {
+        try {
+          configured = validScopeSelection(
+            JSON.parse(row.configured_scopes),
+            grant.scope,
+          ) ?? [];
+        } catch {
+          configured = [];
+        }
+      }
+      const available = grant.scope
+        .map((scope) => SCOPE_BY_ID.get(scope))
+        .filter((scope) => scope !== undefined);
+      return [{
+        id: grant.id,
+        clientId: grant.clientId,
+        clientName: row?.client_name
+          ?? normalizeClientName(grant.metadata?.clientName)
+          ?? undefined,
+        description: row?.description ?? "",
+        scopes: configured,
+        availableScopes: available,
+        scopeCount: expandScopes(configured).length,
+        createdAt: grant.createdAt,
+      }];
+    }),
+    limits: {
+      connectedApps: MAX_CONNECTED_APPS,
+      descriptionLength: MAX_DESCRIPTION_LENGTH,
+    },
+  });
+}
+
+async function editConnection(request: Request, env: Env): Promise<Response> {
+  if (!validPostOrigin(request)) return json({ error: "invalid-origin" }, 403);
+  const [userId, body] = await Promise.all([
+    currentUser(request, env),
+    request.json<{
+      grantId?: unknown;
+      description?: unknown;
+      scopes?: unknown;
+    }>().catch(() => null),
+  ]);
+  if (!userId) return json({ error: "not-authenticated" }, 401);
+  if (
+    !body
+    || typeof body.grantId !== "string"
+    || !/^[A-Za-z0-9_-]{1,256}$/.test(body.grantId)
+  ) {
+    return json({ error: "invalid-grant-id" }, 400);
+  }
+  const result = await env.OAUTH_PROVIDER.listUserGrants(userId, { limit: 100 });
+  const grant = result.items.find((item) => item.id === body.grantId);
+  if (!grant) return json({ error: "connection-not-found" }, 404);
+  const delegationId = delegationIdFromGrant(grant);
+  if (!delegationId) return json({ error: "invalid-connection" }, 409);
+  const scopes = validScopeSelection(body.scopes, grant.scope);
+  if (!scopes) return json({ error: "invalid-scope-selection" }, 400);
+  const description = normalizeDescription(body.description);
+  await syncConnections(env, userId, [grant]);
+  const updated = await updateConnection(env, {
+    userId,
+    delegationId,
+    description,
+    scopes,
+  });
+  if (!updated) return json({ error: "connection-not-found" }, 404);
+  return json({
+    success: true,
+    description,
+    scopes,
+    scopeCount: expandScopes(scopes).length,
   });
 }
 
@@ -265,7 +393,12 @@ async function revokeConnection(request: Request, env: Env): Promise<Response> {
   if (!body?.grantId || !/^[A-Za-z0-9_-]{1,256}$/.test(body.grantId)) {
     return json({ error: "invalid-grant-id" }, 400);
   }
+  const grants = await env.OAUTH_PROVIDER.listUserGrants(userId, { limit: 100 });
+  const grant = grants.items.find((item) => item.id === body.grantId);
+  if (!grant) return json({ error: "connection-not-found" }, 404);
   await env.OAUTH_PROVIDER.revokeGrant(body.grantId, userId);
+  const delegationId = delegationIdFromGrant(grant);
+  if (delegationId) await deleteConnection(env, userId, delegationId);
   return json({ success: true });
 }
 
@@ -290,6 +423,9 @@ export const authHandler: ExportedHandler<Env> = {
       }
       if (request.method === "GET" && url.pathname === "/connections/context") {
         return connectionsContext(request, env);
+      }
+      if (request.method === "POST" && url.pathname === "/connections/update") {
+        return editConnection(request, env);
       }
       if (request.method === "POST" && url.pathname === "/connections/revoke") {
         return revokeConnection(request, env);
