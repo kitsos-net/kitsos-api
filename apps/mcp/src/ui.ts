@@ -63,43 +63,68 @@ const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\\\"":"&quot;","'":"&#039;"}[c]));
 const CDN_TIMEOUT_MS = 1500;
 const CDN_FONT_PATH = "/fonts/kitsos-default/kitsos-default-regular.woff2";
+const objectUrls = [];
 let loaded = false;
-function fallbackCdnHosts() {
+function cdnHostOrder() {
   const hosts = ["cdn2.kitsos.net", "cdn3.kitsos.net"];
   const random = crypto.getRandomValues(new Uint32Array(1))[0];
-  return random % 2 === 0 ? hosts : hosts.reverse();
+  return ["cdn.kitsos.net", ...(random % 2 === 0 ? hosts : hosts.reverse())];
 }
-async function loadFont(host) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), CDN_TIMEOUT_MS);
+async function fetchCdnAsset(path) {
+  for (const host of cdnHostOrder()) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), CDN_TIMEOUT_MS);
+    try {
+      const response = await fetch("https://" + host + path, {
+        cache: "force-cache",
+        mode: "cors",
+        signal: controller.signal,
+      });
+      if (!response.ok) continue;
+      return await response.blob();
+    } catch {
+      // Try the next CDN host.
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  return null;
+}
+async function loadBrandFont() {
+  if (!("FontFace" in window) || !document.fonts) return;
+  const blob = await fetchCdnAsset(CDN_FONT_PATH);
+  if (!blob) return;
   try {
-    const response = await fetch("https://" + host + CDN_FONT_PATH, {
-      cache: "force-cache",
-      mode: "cors",
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error("font-unavailable");
-    const data = await response.arrayBuffer();
-    const face = new FontFace("Kitsos Default", data, {
+    const face = new FontFace("Kitsos Default", await blob.arrayBuffer(), {
       style: "normal",
       weight: "400",
     });
     await face.load();
     document.fonts.add(face);
-    return true;
   } catch {
-    return false;
-  } finally {
-    clearTimeout(timeout);
+    // Keep the system font stack if the downloaded file is invalid.
   }
 }
-async function loadBrandFont() {
-  if (!("FontFace" in window) || !document.fonts) return;
-  for (const host of ["cdn.kitsos.net", ...fallbackCdnHosts()]) {
-    if (await loadFont(host)) return;
-  }
+async function loadVisualAsset(node) {
+  const path = node.dataset.cdnPath;
+  if (!path) return;
+  const blob = await fetchCdnAsset(path);
+  if (!blob) return;
+  const objectUrl = URL.createObjectURL(blob);
+  objectUrls.push(objectUrl);
+  if (node instanceof HTMLImageElement) node.src = objectUrl;
+  if (node instanceof HTMLLinkElement) node.href = objectUrl;
 }
-void loadBrandFont();
+function loadDesignAssets() {
+  void loadBrandFont();
+  document.querySelectorAll("[data-cdn-path]").forEach((node) => {
+    void loadVisualAsset(node);
+  });
+}
+loadDesignAssets();
+window.addEventListener("pagehide", () => {
+  objectUrls.forEach((url) => URL.revokeObjectURL(url));
+});
 function showError(message) {
   const node = $("#status");
   node.textContent = message || "Die Anfrage konnte nicht verarbeitet werden.";
@@ -274,7 +299,7 @@ function shell(options: {
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>${options.title}</title>
-  <link rel="icon" href="https://cdn.kitsos.net/logos/fav/favicon.svg">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E" data-cdn-path="/logos/fav/favicon.svg">
   <style nonce="${options.nonce}">${STYLE}</style>
   <script defer crossorigin="anonymous" src="https://${clerkDomain}/npm/@clerk/ui@1/dist/ui.browser.js"></script>
   <script defer crossorigin="anonymous" data-clerk-publishable-key="${options.publishableKey}" src="https://${clerkDomain}/npm/@clerk/clerk-js@6/dist/clerk.browser.js"></script>
@@ -284,8 +309,8 @@ function shell(options: {
     <header class="topbar">
       <a class="brand" href="https://kitsos.net">
         <picture>
-          <img class="logo logo-light" src="https://cdn.kitsos.net/logos/k.png" alt="Kitsos">
-          <img class="logo logo-dark" src="https://cdn.kitsos.net/logos/k-dark.png" alt="Kitsos">
+          <img class="logo logo-light" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" data-cdn-path="/logos/k.png" alt="Kitsos">
+          <img class="logo logo-dark" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" data-cdn-path="/logos/k-dark.png" alt="Kitsos">
         </picture>
         <span>Kitsos</span>
       </a>
@@ -370,7 +395,7 @@ export function securityHeaders(nonce: string, publishableKey: string): Headers 
       `script-src 'nonce-${nonce}' https://${clerkDomain}`,
       `style-src 'nonce-${nonce}' 'unsafe-inline'`,
       `connect-src 'self' https://cdn.kitsos.net https://cdn2.kitsos.net https://cdn3.kitsos.net https://${clerkDomain} https://api.clerk.com`,
-      `img-src 'self' data: https://cdn.kitsos.net https://${clerkDomain}`,
+      `img-src 'self' data: blob: https://cdn.kitsos.net https://cdn2.kitsos.net https://cdn3.kitsos.net https://${clerkDomain}`,
       `font-src https://cdn.kitsos.net https://cdn2.kitsos.net https://cdn3.kitsos.net https://${clerkDomain}`,
       `frame-src https://${clerkDomain}`,
       "base-uri 'none'",
