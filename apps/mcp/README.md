@@ -62,6 +62,15 @@ The MCP Worker deliberately owns no Clerk secret. Its consent UI sends the
 Clerk session token to the private `McpIdentityEntrypoint` service binding on
 `keys-api`, where the already configured `CLERK_SECRET_KEY` verifies it.
 
+## Design assets
+
+The consent and connections pages follow the Kitsos design system. The browser
+loads the brand font from `cdn.kitsos.net` with a 1.5-second timeout. If that
+request fails or exceeds the timeout, it chooses `cdn2.kitsos.net` or
+`cdn3.kitsos.net` with equal probability. If the selected fallback fails, the
+other fallback is attempted. If all three fail, no webfont is installed and
+the existing Arial/Helvetica system-font stack remains active.
+
 ## Local checks
 
 ```sh
