@@ -1,6 +1,7 @@
 import type { Env, AuthContext, CheckResult, RateLimitOptions } from "./types";
 import { verifyClerkSession, ensureUserRow } from "./clerk";
 import { acceptPrivateMcpDelegation, mcpDelegationHeaders } from "./delegation";
+import { annotateAuthenticatedRequest } from "./telemetry";
 import {
   validateApiKey,
   checkScope,
@@ -41,6 +42,7 @@ export {
   invalidateUserApiKeyCaches,
   acceptPrivateMcpDelegation,
   mcpDelegationHeaders,
+  annotateAuthenticatedRequest,
 };
 
 export function withRetryAfter(response: Response, result: CheckResult): Response {

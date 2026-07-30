@@ -1,7 +1,8 @@
 import type { McpDelegation } from "@kitsos/auth";
+import type { TelemetryEnv } from "@kitsos/telemetry";
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 
-export interface Env {
+export interface Env extends TelemetryEnv {
   DB: D1Database;
   AUTH_CACHE: KVNamespace;
   USAGE_COUNTERS: KVNamespace;

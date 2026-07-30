@@ -1,6 +1,7 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
-import { checkRateLimit } from "@kitsos/auth";
+import { annotateAuthenticatedRequest, checkRateLimit } from "@kitsos/auth";
+import { withTelemetry } from "@kitsos/telemetry";
 import { createMcpHandler } from "agents/mcp/server";
 import { authHandler } from "./auth-handler";
 import type { Env, McpProps, ToolContext } from "./env";
@@ -184,6 +185,15 @@ export class McpApiHandler extends WorkerEntrypoint<Env, McpProps> {
       props.delegationId,
       props.scopes,
     );
+    annotateAuthenticatedRequest({
+      method: "mcp",
+      userId: props.userId,
+      appId: "mcp",
+      credentialId: props.delegationId,
+      clientId: props.clientId,
+      scopes: [...scopes],
+      groupIds: [],
+    });
     const context: ToolContext = {
       env: this.env,
       scopes,
@@ -294,4 +304,4 @@ const worker: ExportedHandler<Env> = {
   },
 };
 
-export default worker;
+export default withTelemetry(worker, "mcp");
