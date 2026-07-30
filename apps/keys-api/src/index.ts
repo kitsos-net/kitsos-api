@@ -1,9 +1,11 @@
 import { Hono } from "hono";
+import { WorkerEntrypoint } from "cloudflare:workers";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import {
   consumeHardDailyLimit,
   getEffectiveLimit,
+  getPolicyScopes,
   invalidateApiKeyCache,
   invalidateAppApiKeyCaches,
   invalidateGroupApiKeyCaches,
@@ -11,6 +13,9 @@ import {
   LIMIT_DEFINITIONS,
   isValidLimitConfiguration,
   sha256Hex,
+  acceptPrivateMcpDelegation,
+  ensureUserRow,
+  verifyClerkSession,
 } from "@kitsos/auth";
 import { withTelemetry } from "@kitsos/telemetry";
 import { requireAdmin, requireUser } from "./middleware";
@@ -19,6 +24,7 @@ import { boundedLimit, boundedOffset, isNonEmptyString, isStringArray } from "./
 import type { Env } from "./env";
 
 type Vars = { userId: string };
+type KeyPermission = { appId: string; scopes: string[] };
 const app = new Hono<{ Bindings: Env; Variables: Vars }>().basePath("/v1");
 
 app.use("*", async (c, next) => {
@@ -83,6 +89,105 @@ async function prepareApiKeyCreation(env: Env, userId: string): Promise<number |
   );
   if (!withinHardCreationLimit) return null;
   return getEffectiveLimit(env, userId, "api_keys");
+}
+
+function normalizeKeyPermissions(body: {
+  appId?: unknown;
+  scopes?: unknown;
+  permissions?: unknown;
+}): KeyPermission[] | null {
+  const hasLegacy = body.appId !== undefined || body.scopes !== undefined;
+  const hasCanonical = body.permissions !== undefined;
+  if (hasLegacy === hasCanonical) return null;
+  const raw = hasCanonical
+    ? body.permissions
+    : [{ appId: body.appId, scopes: body.scopes }];
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > 20) return null;
+  const seenApps = new Set<string>();
+  const permissions: KeyPermission[] = [];
+  for (const item of raw) {
+    if (
+      !item
+      || typeof item !== "object"
+      || !isNonEmptyString((item as { appId?: unknown }).appId, 63)
+      || !isStringArray((item as { scopes?: unknown }).scopes)
+    ) {
+      return null;
+    }
+    const appId = (item as { appId: string }).appId;
+    if (seenApps.has(appId)) return null;
+    seenApps.add(appId);
+    permissions.push({
+      appId,
+      scopes: [...new Set((item as { scopes: string[] }).scopes)],
+    });
+  }
+  return permissions;
+}
+
+async function validateCatalogPermissions(
+  env: Env,
+  permissions: KeyPermission[],
+): Promise<boolean> {
+  for (const permission of permissions) {
+    const placeholders = permission.scopes.map(() => "?").join(",");
+    const result = await env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM app_scopes
+       WHERE app_id = ? AND scope IN (${placeholders})`
+    )
+      .bind(permission.appId, ...permission.scopes)
+      .first<{ count: number }>();
+    if (result?.count !== permission.scopes.length) return false;
+  }
+  return true;
+}
+
+async function insertKeyPermissions(
+  env: Env,
+  keyId: string,
+  permissions: KeyPermission[],
+): Promise<void> {
+  await env.DB.batch(permissions.map((permission) =>
+    env.DB.prepare(
+      "INSERT INTO api_key_apps (api_key_id, app_id, scopes) VALUES (?, ?, ?)"
+    ).bind(keyId, permission.appId, JSON.stringify(permission.scopes))
+  ));
+}
+
+async function serializeApiKeys(
+  env: Env,
+  rows: Record<string, unknown>[],
+): Promise<Record<string, unknown>[]> {
+  if (rows.length === 0) return [];
+  const ids = rows.map((row) => String(row.id));
+  const grants = await env.DB.prepare(
+    `SELECT api_key_id, app_id, scopes FROM api_key_apps
+     WHERE api_key_id IN (${ids.map(() => "?").join(",")})
+     ORDER BY app_id`
+  )
+    .bind(...ids)
+    .all<{ api_key_id: string; app_id: string; scopes: string }>();
+  const byKey = new Map<string, KeyPermission[]>();
+  for (const grant of grants.results) {
+    const permissions = byKey.get(grant.api_key_id) ?? [];
+    permissions.push({
+      appId: grant.app_id,
+      scopes: JSON.parse(grant.scopes) as string[],
+    });
+    byKey.set(grant.api_key_id, permissions);
+  }
+  return rows.map((row) => {
+    const permissions = byKey.get(String(row.id)) ?? [];
+    const { app_id: _appId, scopes: _scopes, ...rest } = row;
+    return {
+      ...rest,
+      permissions,
+      ...(permissions.length === 1 ? {
+        appId: permissions[0].appId,
+        scopes: permissions[0].scopes,
+      } : {}),
+    };
+  });
 }
 
 // ============================================================
@@ -341,23 +446,24 @@ admin.get("/api-keys", async (c) => {
         .prepare("SELECT id, user_id, app_id, name, description, status, scopes, expires_at, last_used_at, created_at FROM api_keys ORDER BY created_at DESC, id LIMIT ? OFFSET ?")
         .bind(page.limit, page.offset)
         .all();
-  return c.json(decodeJsonFields(r.results, ["scopes"])); // never returns key_hash / raw key
+  return c.json(await serializeApiKeys(c.env, r.results)); // never returns key_hash / raw key
 });
 
 admin.post("/api-keys", async (c) => {
   const body = await c.req.json<{
     userId: string;
-    appId: string;
+    appId?: string;
     name?: string;
     description?: string;
-    scopes: string[];
+    scopes?: string[];
+    permissions?: KeyPermission[];
     expiresAt?: number;
   }>().catch(() => null);
+  const permissions = body ? normalizeKeyPermissions(body) : null;
   if (
     !body
     || !isNonEmptyString(body.userId, 100)
-    || !isNonEmptyString(body.appId, 63)
-    || !isStringArray(body.scopes)
+    || !permissions
     || (body.name !== undefined && !isNonEmptyString(body.name, 100))
     || (body.description !== undefined && (
       typeof body.description !== "string" || body.description.length > 2_000
@@ -370,18 +476,13 @@ admin.post("/api-keys", async (c) => {
   ) {
     return c.json({ error: "invalid-request-body" }, 400);
   }
-  const uniqueScopes = [...new Set(body.scopes)];
   const user = await c.env.DB.prepare("SELECT 1 FROM users WHERE id = ?")
     .bind(body.userId)
     .first();
   if (!user) return c.json({ error: "user-not-found" }, 404);
-  const validScopes = await c.env.DB.prepare(
-    `SELECT COUNT(*) AS count FROM app_scopes
-     WHERE app_id = ? AND scope IN (${uniqueScopes.map(() => "?").join(",")})`
-  )
-    .bind(body.appId, ...uniqueScopes)
-    .first<{ count: number }>();
-  if (validScopes?.count !== uniqueScopes.length) return c.json({ error: "invalid-scopes" }, 400);
+  if (!(await validateCatalogPermissions(c.env, permissions))) {
+    return c.json({ error: "invalid-scopes" }, 400);
+  }
 
   const rawKey = `kitsos_${crypto.randomUUID().replace(/-/g, "")}`;
   const keyHash = await sha256Hex(rawKey);
@@ -403,10 +504,10 @@ admin.post("/api-keys", async (c) => {
       keyId,
       keyHash,
       body.userId,
-      body.appId,
+      permissions[0].appId,
       body.name ?? null,
       body.description ?? null,
-      JSON.stringify(uniqueScopes),
+      JSON.stringify(permissions.flatMap((permission) => permission.scopes)),
       body.expiresAt ?? null,
       body.userId,
       apiKeyLimit
@@ -415,9 +516,15 @@ admin.post("/api-keys", async (c) => {
   if (created.meta.changes !== 1) {
     return c.json({ error: "api-key-limit-exceeded", limit: apiKeyLimit }, 429);
   }
+  try {
+    await insertKeyPermissions(c.env, keyId, permissions);
+  } catch (error) {
+    await c.env.DB.prepare("DELETE FROM api_keys WHERE id = ?").bind(keyId).run();
+    throw error;
+  }
 
   // rawKey is only ever shown here — not recoverable afterwards
-  return c.json({ id: keyId, key: rawKey }, 201);
+  return c.json({ id: keyId, key: rawKey, permissions }, 201);
 });
 
 admin.delete("/api-keys/:keyId", async (c) => {
@@ -620,22 +727,23 @@ me.get("/api-keys", async (c) => {
     .prepare("SELECT id, app_id, name, description, status, scopes, expires_at, last_used_at, created_at FROM api_keys WHERE user_id = ? ORDER BY created_at DESC, id LIMIT ? OFFSET ?")
     .bind(c.get("userId"), page.limit, page.offset)
     .all();
-  return c.json(decodeJsonFields(r.results, ["scopes"]));
+  return c.json(await serializeApiKeys(c.env, r.results));
 });
 
 // Users may only create keys with scopes their own policy already grants.
 me.post("/api-keys", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json<{
-    appId: string;
+    appId?: string;
     name?: string;
     description?: string;
-    scopes: string[];
+    scopes?: string[];
+    permissions?: KeyPermission[];
   }>().catch(() => null);
+  const permissions = body ? normalizeKeyPermissions(body) : null;
   if (
     !body
-    || !isNonEmptyString(body.appId, 63)
-    || !isStringArray(body.scopes)
+    || !permissions
     || (body.name !== undefined && !isNonEmptyString(body.name, 100))
     || (body.description !== undefined && (
       typeof body.description !== "string" || body.description.length > 2_000
@@ -644,26 +752,15 @@ me.post("/api-keys", async (c) => {
     return c.json({ error: "invalid-request-body" }, 400);
   }
 
-  const groupRows = await c.env.DB.prepare("SELECT group_id FROM group_members WHERE user_id = ?")
-    .bind(userId)
-    .all<{ group_id: string }>();
-  const groupIds = groupRows.results.map((g) => g.group_id);
-
-  const policyRows = await c.env.DB
-    .prepare(
-      `SELECT scopes FROM policies WHERE app_id = ? AND (
-         (subject_type = 'user' AND subject_id = ?) OR
-         (subject_type = 'group' AND subject_id IN (${groupIds.map(() => "?").join(",") || "''"}))
-       )`
-    )
-    .bind(body.appId, userId, ...groupIds)
-    .all<{ scopes: string }>();
-
-  const allowedScopes = new Set<string>(policyRows.results.flatMap((p) => JSON.parse(p.scopes) as string[]));
-  const requestedScopes = [...new Set(body.scopes)];
-
-  if (requestedScopes.some((scope) => !allowedScopes.has(scope))) {
-    return c.json({ error: "scope-not-allowed" }, 403);
+  if (!(await validateCatalogPermissions(c.env, permissions))) {
+    return c.json({ error: "invalid-scopes" }, 400);
+  }
+  for (const permission of permissions) {
+    const policy = await getPolicyScopes(c.env, userId, permission.appId);
+    const allowedScopes = new Set(policy?.scopes ?? []);
+    if (permission.scopes.some((scope) => !allowedScopes.has(scope))) {
+      return c.json({ error: "scope-not-allowed", appId: permission.appId }, 403);
+    }
   }
 
   const rawKey = `kitsos_${crypto.randomUUID().replace(/-/g, "")}`;
@@ -686,10 +783,10 @@ me.post("/api-keys", async (c) => {
       keyId,
       keyHash,
       userId,
-      body.appId,
+      permissions[0].appId,
       body.name ?? null,
       body.description ?? null,
-      JSON.stringify(requestedScopes),
+      JSON.stringify(permissions.flatMap((permission) => permission.scopes)),
       userId,
       apiKeyLimit
     )
@@ -697,8 +794,14 @@ me.post("/api-keys", async (c) => {
   if (created.meta.changes !== 1) {
     return c.json({ error: "api-key-limit-exceeded", limit: apiKeyLimit }, 429);
   }
+  try {
+    await insertKeyPermissions(c.env, keyId, permissions);
+  } catch (error) {
+    await c.env.DB.prepare("DELETE FROM api_keys WHERE id = ?").bind(keyId).run();
+    throw error;
+  }
 
-  return c.json({ id: keyId, key: rawKey, scopes: requestedScopes }, 201);
+  return c.json({ id: keyId, key: rawKey, permissions }, 201);
 });
 
 me.delete("/api-keys/:keyId", async (c) => {
@@ -834,3 +937,44 @@ export default {
     ctx.waitUntil(cleanupExpiredData(env));
   },
 };
+
+export class McpEntrypoint extends WorkerEntrypoint<Env> {
+  async fetch(request: Request): Promise<Response> {
+    const delegated = acceptPrivateMcpDelegation(this.env, request);
+    if (!delegated) return Response.json({ error: "invalid-mcp-delegation" }, { status: 401 });
+    return instrumented.fetch!(
+      delegated.request as Request<unknown, IncomingRequestCfProperties>,
+      delegated.env,
+      this.ctx,
+    );
+  }
+}
+
+/**
+ * Private Clerk identity verifier for the MCP consent UI. Keeping this on the
+ * keys worker means the public MCP worker never needs its own Clerk secret.
+ * Named entrypoints are only reachable through an explicit service binding.
+ */
+export class McpIdentityEntrypoint extends WorkerEntrypoint<Env> {
+  async fetch(request: Request): Promise<Response> {
+    if (request.method !== "POST" || new URL(request.url).pathname !== "/verify") {
+      return Response.json({ error: "not-found" }, { status: 404 });
+    }
+    const token = (request.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "");
+    if (!token || token.length > 8192) {
+      return Response.json({ error: "not-authenticated" }, { status: 401 });
+    }
+    const session = await verifyClerkSession(token, this.env);
+    if (!session) {
+      return Response.json({ error: "not-authenticated" }, { status: 401 });
+    }
+    await ensureUserRow(session.userId, this.env);
+    const user = await this.env.DB.prepare("SELECT status FROM users WHERE id = ?")
+      .bind(session.userId)
+      .first<{ status: string }>();
+    if (user?.status !== "active") {
+      return Response.json({ error: "user-inactive" }, { status: 403 });
+    }
+    return Response.json({ userId: session.userId });
+  }
+}

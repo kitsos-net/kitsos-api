@@ -1,7 +1,13 @@
 import { Hono } from "hono";
+import { WorkerEntrypoint } from "cloudflare:workers";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
-import { consumeDailyLimit, getEffectiveLimit, sha256Hex } from "@kitsos/auth";
+import {
+  acceptPrivateMcpDelegation,
+  consumeDailyLimit,
+  getEffectiveLimit,
+  sha256Hex,
+} from "@kitsos/auth";
 import { withTelemetry } from "@kitsos/telemetry";
 import { requireUser, requireAdmin } from "./middleware";
 import { lookupTxtRecords, verificationRecordName, generateVerificationToken } from "./dns";
@@ -493,4 +499,18 @@ app.get("/health", (c) => c.json({ ok: true }));
 app.notFound((c) => c.json({ error: "not-found" }, 404));
 app.onError((_error, c) => c.json({ error: "internal-error" }, 500));
 
-export default withTelemetry(app, "verify");
+const instrumented = withTelemetry(app, "verify");
+
+export class McpEntrypoint extends WorkerEntrypoint<Env> {
+  async fetch(request: Request): Promise<Response> {
+    const delegated = acceptPrivateMcpDelegation(this.env, request);
+    if (!delegated) return Response.json({ error: "invalid-mcp-delegation" }, { status: 401 });
+    return instrumented.fetch!(
+      delegated.request as Request<unknown, IncomingRequestCfProperties>,
+      delegated.env,
+      this.ctx,
+    );
+  }
+}
+
+export default instrumented;

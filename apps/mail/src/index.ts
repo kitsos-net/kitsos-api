@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { WorkerEntrypoint } from "cloudflare:workers";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import {
@@ -10,6 +11,7 @@ import {
   consumeHardDailyLimit,
   getEffectiveLimit,
   sha256Hex,
+  acceptPrivateMcpDelegation,
 } from "@kitsos/auth";
 import { withTelemetry } from "@kitsos/telemetry";
 import { resolvePayload } from "./dotpath";
@@ -265,7 +267,7 @@ app.post("/send", async (c) => {
 // Authenticated — /templates
 // ============================================================
 app.get("/templates", async (c) => {
-  const auth = await authenticate(c.req.raw, c.env, "mail:manage", APP_ID);
+  const auth = await authenticate(c.req.raw, c.env, "mail:read", APP_ID);
   if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
   const page = pagination(c.req.query("limit"), c.req.query("offset"));
   if (!page) return c.json({ error: "invalid-pagination" }, 400);
@@ -379,7 +381,7 @@ app.delete("/templates/:templateId", async (c) => {
 // Authenticated — /webhooks
 // ============================================================
 app.get("/webhooks", async (c) => {
-  const auth = await authenticate(c.req.raw, c.env, "mail:manage", APP_ID);
+  const auth = await authenticate(c.req.raw, c.env, "mail:read", APP_ID);
   if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
   const page = pagination(c.req.query("limit"), c.req.query("offset"));
   if (!page) return c.json({ error: "invalid-pagination" }, 400);
@@ -549,4 +551,18 @@ app.get("/health", (c) => c.json({ ok: true }));
 app.notFound((c) => c.json({ error: "not-found" }, 404));
 app.onError((_error, c) => c.json({ error: "internal-error" }, 500));
 
-export default withTelemetry(app, "mail");
+const instrumented = withTelemetry(app, "mail");
+
+export class McpEntrypoint extends WorkerEntrypoint<Env> {
+  async fetch(request: Request): Promise<Response> {
+    const delegated = acceptPrivateMcpDelegation(this.env, request);
+    if (!delegated) return Response.json({ error: "invalid-mcp-delegation" }, { status: 401 });
+    return instrumented.fetch!(
+      delegated.request as Request<unknown, IncomingRequestCfProperties>,
+      delegated.env,
+      this.ctx,
+    );
+  }
+}
+
+export default instrumented;

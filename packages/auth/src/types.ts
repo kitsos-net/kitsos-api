@@ -4,15 +4,26 @@ export interface Env {
   USAGE_COUNTERS: KVNamespace;
   CLERK_SECRET_KEY: string;
   CLERK_PUBLISHABLE_KEY: string;
+  /** Present only on a private Worker service-binding entrypoint. */
+  MCP_DELEGATION?: McpDelegation;
 }
 
-export type AuthMethod = "session" | "api_key";
+export type AuthMethod = "session" | "api_key" | "mcp";
+
+export interface McpDelegation {
+  userId: string;
+  clientId: string;
+  grantId: string;
+  scopes: string[];
+}
 
 export interface AuthContext {
   method: AuthMethod;
   userId: string;
   appId: string;
   apiKeyId?: string;
+  credentialId?: string;
+  clientId?: string;
   scopes: string[];         // effective scopes (from key AND policy, intersected)
   groupIds: string[];
 }

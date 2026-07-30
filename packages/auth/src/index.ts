@@ -1,5 +1,6 @@
 import type { Env, AuthContext, CheckResult, RateLimitOptions } from "./types";
 import { verifyClerkSession, ensureUserRow } from "./clerk";
+import { acceptPrivateMcpDelegation, mcpDelegationHeaders } from "./delegation";
 import {
   validateApiKey,
   checkScope,
@@ -9,7 +10,9 @@ import {
   writeAuditLog,
   sha256Hex,
   constantTimeEqual,
+  expandScopes,
   getPolicyScopes,
+  getMcpPolicyScopes,
   invalidateApiKeyCache,
   invalidateAppApiKeyCaches,
   invalidateGroupApiKeyCaches,
@@ -29,11 +32,15 @@ export {
   writeAuditLog,
   sha256Hex,
   constantTimeEqual,
+  expandScopes,
   getPolicyScopes,
+  getMcpPolicyScopes,
   invalidateApiKeyCache,
   invalidateAppApiKeyCaches,
   invalidateGroupApiKeyCaches,
   invalidateUserApiKeyCaches,
+  acceptPrivateMcpDelegation,
+  mcpDelegationHeaders,
 };
 
 export function withRetryAfter(response: Response, result: CheckResult): Response {
@@ -44,6 +51,38 @@ export function withRetryAfter(response: Response, result: CheckResult): Respons
 }
 
 const DEFAULT_RATE_LIMIT: RateLimitOptions = { windowSeconds: 60, maxRequests: 60 };
+
+export async function authenticateMcpDelegation(
+  env: Env,
+  requiredScope: string,
+  appId: string,
+): Promise<(CheckResult & { context?: AuthContext }) | null> {
+  const delegation = env.MCP_DELEGATION;
+  if (!delegation) return null;
+  if (
+    !delegation.userId
+    || !delegation.clientId
+    || !delegation.grantId
+    || !Array.isArray(delegation.scopes)
+  ) {
+    return { allowed: false, status: 401, reason: "invalid-mcp-delegation" };
+  }
+  const policy = await getMcpPolicyScopes(env, delegation.userId, appId);
+  if (!policy) return { allowed: false, status: 401, reason: "invalid-credentials" };
+  const allowed = new Set(expandScopes(policy.scopes));
+  const context: AuthContext = {
+    method: "mcp",
+    userId: delegation.userId,
+    appId,
+    credentialId: delegation.grantId,
+    clientId: delegation.clientId,
+    scopes: expandScopes(delegation.scopes.filter((scope) => allowed.has(scope))),
+    groupIds: policy.groupIds,
+  };
+  const scopeCheck = checkScope(context, requiredScope);
+  if (!scopeCheck.allowed) return { ...scopeCheck, context };
+  return { allowed: true, status: 200, context };
+}
 
 /**
  * Standard entry point for app workers. Pulls credentials from the
@@ -65,6 +104,45 @@ export async function authenticate(
   appId: string,
   rateLimit: RateLimitOptions = DEFAULT_RATE_LIMIT
 ): Promise<CheckResult & { context?: AuthContext }> {
+  const delegated = await authenticateMcpDelegation(env, requiredScope, appId);
+  if (delegated) {
+    if (!delegated.allowed) {
+      await writeAuditLog(env, {
+        userId: delegated.context?.userId,
+        appId,
+        action: requiredScope,
+        result: "denied",
+        reason: delegated.reason,
+        context: delegated.context,
+      });
+      return delegated;
+    }
+    const context = delegated.context!;
+    const rlCheck = await checkRateLimit(
+      env,
+      `mcp:${context.userId}:${context.clientId}:${appId}`,
+      rateLimit,
+    );
+    if (!rlCheck.allowed) {
+      await writeAuditLog(env, {
+        userId: context.userId,
+        appId,
+        action: requiredScope,
+        result: "denied",
+        reason: rlCheck.reason,
+        context,
+      });
+      return rlCheck;
+    }
+    await writeAuditLog(env, {
+      userId: context.userId,
+      appId,
+      action: requiredScope,
+      result: "allowed",
+      context,
+    });
+    return delegated;
+  }
   const authHeader = request.headers.get("Authorization") ?? "";
   const token = authHeader.replace(/^Bearer\s+/i, "");
 
@@ -109,13 +187,14 @@ export async function authenticate(
       action: requiredScope,
       result: "denied",
       reason: scopeCheck.reason,
+      context,
     });
     return scopeCheck;
   }
 
   const rlCheck = await checkRateLimit(
     env,
-    context.apiKeyId ?? `session:${context.userId}`,
+    context.apiKeyId ? `api-key:${context.apiKeyId}:${appId}` : `session:${context.userId}`,
     rateLimit
   );
   if (!rlCheck.allowed) {
@@ -126,6 +205,7 @@ export async function authenticate(
       action: requiredScope,
       result: "denied",
       reason: rlCheck.reason,
+      context,
     });
     return rlCheck;
   }
@@ -136,6 +216,7 @@ export async function authenticate(
     apiKeyId: context.apiKeyId,
     action: requiredScope,
     result: "allowed",
+    context,
   });
 
   return { allowed: true, status: 200, context };
@@ -177,6 +258,7 @@ export async function authenticateApiKey(
       action: requiredScope,
       result: "denied",
       reason: scopeCheck.reason,
+      context,
     });
     return scopeCheck;
   }
@@ -201,6 +283,7 @@ export async function authenticateApiKey(
       action: requiredScope,
       result: "denied",
       reason: rlCheck.reason,
+      context,
     });
     return rlCheck;
   }
@@ -227,6 +310,7 @@ export async function authenticateApiKey(
         action: requiredScope,
         result: "denied",
         reason: denied.reason,
+        context,
       });
       return denied;
     }
@@ -238,6 +322,7 @@ export async function authenticateApiKey(
     apiKeyId: context.apiKeyId,
     action: requiredScope,
     result: "allowed",
+    context,
   });
 
   return { allowed: true, status: 200, context };

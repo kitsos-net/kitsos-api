@@ -18,6 +18,11 @@ Raw API keys (`kitsos_...`) are only ever returned once, at creation
 time (`POST /admin/api-keys` or `POST /me/api-keys`). Only the SHA-256
 hash is stored.
 
+Keys may authorize several applications through
+`permissions: [{ appId, scopes }]`. The original single-app
+`appId`/`scopes` input remains accepted for compatibility; list responses
+always include canonical `permissions`.
+
 - `/analytics/*` — machine-to-machine endpoints for Grafana. They accept
   **only** a `kitsos_` API key for the `analytics` app with the
   `analytics:read` scope whose owner is an active member of
