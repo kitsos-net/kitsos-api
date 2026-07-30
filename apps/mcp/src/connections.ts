@@ -1,10 +1,17 @@
 import type { GrantSummary } from "@cloudflare/workers-oauth-provider";
+import { getEffectiveLimit } from "@kitsos/auth";
 import type { Env } from "./env";
 import { SCOPE_BY_ID } from "./scopes";
 
-export const MAX_CONNECTED_APPS = 10;
 export const MAX_CLIENT_NAME_LENGTH = 100;
 export const MAX_DESCRIPTION_LENGTH = 500;
+
+export async function connectedAppsLimit(
+  env: Env,
+  userId: string,
+): Promise<number> {
+  return getEffectiveLimit(env, userId, "mcp_connections");
+}
 
 export interface McpConnectionRow {
   delegation_id: string;
@@ -125,6 +132,7 @@ export async function createConnection(
     clientName: string | null;
     description: string | null;
     scopes: string[];
+    limit: number;
   },
 ): Promise<boolean> {
   const result = await env.DB.prepare(
@@ -144,7 +152,7 @@ export async function createConnection(
     JSON.stringify(input.scopes),
     JSON.stringify(input.scopes),
     input.userId,
-    MAX_CONNECTED_APPS,
+    input.limit,
   ).run();
   return (result.meta.changes ?? 0) === 1;
 }

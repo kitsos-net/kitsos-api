@@ -5,10 +5,10 @@ import {
 } from "@kitsos/auth";
 import {
   connectionRows,
+  connectedAppsLimit,
   createConnection,
   delegationIdFromGrant,
   deleteConnection,
-  MAX_CONNECTED_APPS,
   MAX_CLIENT_NAME_LENGTH,
   MAX_DESCRIPTION_LENGTH,
   normalizeClientName,
@@ -217,7 +217,10 @@ async function approveConsent(request: Request, env: Env): Promise<Response> {
     return json({ error: "invalid-scope-selection" }, 400);
   }
   const description = normalizeDescription(body.description);
-  const grants = await env.OAUTH_PROVIDER.listUserGrants(userId, { limit: 100 });
+  const [grants, connectionLimit] = await Promise.all([
+    env.OAUTH_PROVIDER.listUserGrants(userId, { limit: 100 }),
+    connectedAppsLimit(env, userId),
+  ]);
   await reconcileConnections(env, userId, grants.items);
 
   const delegationId = crypto.randomUUID();
@@ -229,12 +232,13 @@ async function approveConsent(request: Request, env: Env): Promise<Response> {
     delegationId,
     description,
     scopes: selected,
+    limit: connectionLimit,
   });
   if (!created) {
     return json({
       error: "connected-app-limit-exceeded",
-      message: `Du kannst höchstens ${MAX_CONNECTED_APPS} Apps gleichzeitig verbinden.`,
-      limit: MAX_CONNECTED_APPS,
+      message: `Du kannst derzeit höchstens ${connectionLimit} Apps gleichzeitig verbinden.`,
+      limit: connectionLimit,
     }, 409);
   }
   const props: McpProps = {
@@ -298,7 +302,10 @@ function renderConnections(env: Env): Response {
 async function connectionsContext(request: Request, env: Env): Promise<Response> {
   const userId = await currentUser(request, env);
   if (!userId) return json({ error: "not-authenticated" }, 401);
-  const result = await env.OAUTH_PROVIDER.listUserGrants(userId, { limit: 100 });
+  const [result, connectionLimit] = await Promise.all([
+    env.OAUTH_PROVIDER.listUserGrants(userId, { limit: 100 }),
+    connectedAppsLimit(env, userId),
+  ]);
   await reconcileConnections(env, userId, result.items);
   const rows = await connectionRows(env, userId);
   const rowsByDelegation = new Map(rows.map((row) => [row.delegation_id, row]));
@@ -335,7 +342,7 @@ async function connectionsContext(request: Request, env: Env): Promise<Response>
       }];
     }),
     limits: {
-      connectedApps: MAX_CONNECTED_APPS,
+      connectedApps: connectionLimit,
       descriptionLength: MAX_DESCRIPTION_LENGTH,
     },
   });

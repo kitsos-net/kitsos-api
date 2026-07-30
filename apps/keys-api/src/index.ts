@@ -852,6 +852,9 @@ me.get("/limits", async (c) => {
        WHERE user_id = ? AND status = 'active'
          AND (expires_at IS NULL OR expires_at > unixepoch())`
     ).bind(userId),
+    c.env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM mcp_connections WHERE user_id = ?"
+    ).bind(userId),
   ]);
   const limitTypes = Object.keys(LIMIT_DEFINITIONS) as Array<keyof typeof LIMIT_DEFINITIONS>;
   const effectiveLimits = await Promise.all(

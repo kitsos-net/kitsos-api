@@ -104,6 +104,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
             "hme_aliases",
             "verified_resources",
             "verification_attempts_per_day",
+            "mcp_connections",
           ]),
           requestedValue: z.number().int().min(1).max(10_000),
           reason: z.string().max(2_000).optional(),
