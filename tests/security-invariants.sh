@@ -81,7 +81,8 @@ sqlite3 "$test_db" "
      'sender@example.com', '[]', '{}');
 "
 
-if sqlite3 "$test_db" "DELETE FROM resource_grants WHERE id = 'grant-owner';" \
+if sqlite3 "$test_db" \
+  "PRAGMA foreign_keys = ON; DELETE FROM resource_grants WHERE id = 'grant-owner';" \
   2>&1 | grep -q "resource-in-use"; then
   :
 else
@@ -90,10 +91,11 @@ else
 fi
 
 sqlite3 "$test_db" "
+  PRAGMA foreign_keys = ON;
   DELETE FROM mail_webhooks WHERE id = 'webhook';
-  DELETE FROM resource_verifications
-  WHERE resource_id = 'shared' AND user_id = 'owner';
   DELETE FROM resource_grants
+  WHERE resource_id = 'shared' AND user_id = 'owner';
+  DELETE FROM resource_verifications
   WHERE resource_id = 'shared' AND user_id = 'owner';
   DELETE FROM resources
   WHERE id = 'shared'
