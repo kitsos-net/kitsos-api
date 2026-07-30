@@ -4,7 +4,11 @@ import type { Attributes } from "@opentelemetry/api";
 export interface TelemetryEnv {
   AXIOM_TOKEN: string;
   AXIOM_DATASET: string;
+  AXIOM_TRACES_URL?: string;
 }
+
+const AXIOM_EU_TRACES_URL =
+  "https://eu-central-1.aws.edge.axiom.co/v1/traces";
 
 /**
  * Wraps a Worker's fetch handler (a Hono app's default export works fine —
@@ -34,7 +38,7 @@ export function withTelemetry<Env extends TelemetryEnv>(
 
   const config: ResolveConfigFn = (env: Env) => ({
     exporter: {
-      url: "https://api.axiom.co/v1/traces",
+      url: env.AXIOM_TRACES_URL ?? AXIOM_EU_TRACES_URL,
       headers: {
         Authorization: `Bearer ${env.AXIOM_TOKEN}`,
         "X-Axiom-Dataset": env.AXIOM_DATASET,

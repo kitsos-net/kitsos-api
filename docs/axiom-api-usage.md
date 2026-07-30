@@ -4,6 +4,11 @@ Every authenticated HTTP request produces one fully sampled OpenTelemetry
 server span in the dataset configured through `AXIOM_DATASET`. The span
 contains:
 
+Trace ingestion defaults to Axiom's EU Central edge endpoint
+`https://eu-central-1.aws.edge.axiom.co/v1/traces`. Set
+`AXIOM_TRACES_URL` only when the organization uses another Axiom edge or the
+legacy EU endpoint.
+
 | Axiom field | Meaning |
 | --- | --- |
 | `service.name` | Kitsos API (`mail`, `verify`, `keys-api`, `utility`, …) |
