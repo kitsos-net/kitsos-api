@@ -88,6 +88,9 @@ components:
         permissions:
           type: array
           items: { $ref: '#/components/schemas/KeyPermission' }
+        expiresAt:
+          type: integer
+          description: Expiry time as a Unix timestamp when the key is temporary.
     KeyPermission:
       type: object
       required: [appId, scopes]
@@ -482,6 +485,48 @@ paths:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/EffectiveLimit' }
+
+  /me/session-api-key:
+    post:
+      summary: Create a five-minute API Console key for one or more selected apps
+      description: >
+        Creates one short-lived multi-app key. Each app receives all catalog
+        scopes currently granted to the signed-in user by policy. Any previous
+        API Console session key for the user is revoked before the new key is
+        issued. The raw key is returned only once.
+      tags: [self-service]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [appIds]
+              properties:
+                appIds:
+                  type: array
+                  minItems: 1
+                  maxItems: 4
+                  uniqueItems: true
+                  items:
+                    type: string
+                    enum: [mail, hide-my-email, verify, utility]
+      responses:
+        "201":
+          description: Five-minute session key created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/ApiKeyCreated' }
+                  - type: object
+                    required: [expiresAt]
+        "403":
+          description: At least one selected app has no scopes granted by the user's policy
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        "429":
+          description: Stored-key or hard creation-churn limit exceeded
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
 
   /me/api-keys:
     get:
