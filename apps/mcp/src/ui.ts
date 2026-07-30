@@ -1,5 +1,5 @@
 const STYLE = String.raw`
-@font-face{font-family:"Kitsos Default";src:url("https://cdn.kitsos.net/fonts/kitsos-default/kitsos-default-regular.woff2") format("woff2"),url("https://cdn2.kitsos.net/fonts/kitsos-default/kitsos-default-regular.woff2") format("woff2"),url("https://cdn3.kitsos.net/fonts/kitsos-default/kitsos-default-regular.woff2") format("woff2");font-style:normal;font-weight:100 900;font-display:swap}
+@font-face{font-family:"Kitsos Default";src:url("https://cdn.kitsos.net/fonts/kitsos-default/kitsos-default-regular.woff2") format("woff2"),url("https://cdn2.kitsos.net/fonts/kitsos-default/kitsos-default-regular.woff2") format("woff2"),url("https://cdn3.kitsos.net/fonts/kitsos-default/kitsos-default-regular.woff2") format("woff2");font-style:normal;font-weight:400;font-display:swap}
 :root{color-scheme:light dark;--primary:#0768bb;--primary-hover:#055a9f;--primary-soft:#e7f2fc;--bg:#f7f9fc;--surface:#fff;--raised:#fff;--text:#111827;--muted:#52606d;--border:#dce5ee;--success:#12805c;--warning:#a85e00;--danger:#c52b3a;--focus:#9ed5ff;--shadow:0 8px 24px rgb(15 35 55 / 10%);--control:10px;--card:12px;--font:"Kitsos Default",Arial,Helvetica,sans-serif}
 *{box-sizing:border-box}
 body{margin:0;min-height:100vh;background:var(--bg);color:var(--text);font:16px/1.5 var(--font)}
