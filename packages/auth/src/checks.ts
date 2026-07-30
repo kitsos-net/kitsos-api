@@ -373,7 +373,7 @@ export async function checkResourceGrant(
  * allowance, so a KV write per request can make every protected route fail.
  */
 export async function checkRateLimit(
-  env: Env,
+  env: Pick<Env, "DB">,
   bucketKey: string,
   options: RateLimitOptions
 ): Promise<CheckResult> {

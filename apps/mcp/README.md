@@ -32,7 +32,8 @@ through their private MCP entrypoint, so this is not only a UI restriction.
 4. The OAuth Provider issues a one-hour access token and a refresh token that
    expires after 30 days.
 5. Every MCP request recomputes the intersection of the token grant and the
-   user's current D1 policies. Removing a policy therefore takes effect without
+   user's current D1 policies and the connection's current scope selection.
+   Removing a policy or narrowing a connection therefore takes effect without
    waiting for the OAuth grant to expire. Account self-service scopes are the
    intentional exception: every active Clerk user already has those rights
    without an admin-created policy, and OAuth consent can only narrow them.
@@ -42,12 +43,32 @@ through their private MCP entrypoint, so this is not only a UI restriction.
    resource-grant checks.
 
 `mail:manage`, `hme:manage` and `verify:manage` imply their corresponding
-read scope. OAuth grants can be revoked at
-`https://mcp.api.kitsos.net/connections`.
+read scope. At `https://mcp.api.kitsos.net/connections`, users can add a private
+description, narrow or restore scopes within the originally approved grant, and
+revoke a connection. A completely new scope still requires a fresh OAuth
+authorization, so a connected client can never silently gain more access.
+
+Each user can have at most 10 active MCP connections. Existing OAuth grants are
+reconciled into D1 when the connection UI or a new consent flow is opened.
+
+## Limits and input hardening
+
+- MCP traffic: 120 requests/minute per connection and 300/minute per user,
+  in addition to the product Workers' endpoint-specific limits
+- Dynamic client registration: 10 requests/hour per source IP
+- OAuth authorization: 30 requests/minute per source IP
+- OAuth token endpoint: 60 requests/minute per source IP
+- Client registration bodies: 32 KiB; OAuth token and Kitsos UI writes: 16 KiB
+- MCP POST bodies with a declared size: 256 KiB
+- Client names: 100 characters; private descriptions: 500 characters
+- Registration arrays and URL metadata have explicit item and length bounds
+
+The row-count limit is enforced with one conditional D1 insert, so concurrent
+authorization attempts cannot both pass a separate read-then-write check.
 
 ## First deployment
 
-1. Apply D1 migration `packages/auth/0012_mcp_and_multi_app_keys.sql`.
+1. Apply D1 migrations through `packages/auth/0014_mcp_connections.sql`.
 2. Deploy `keys-api`, `verify`, `mail`, `hide-my-email` and `utility`, so their
    named `McpEntrypoint` service-binding entrypoints exist.
 3. Create a dedicated OAuth KV namespace and configure its ID in
