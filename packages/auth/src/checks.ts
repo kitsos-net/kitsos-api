@@ -8,6 +8,20 @@ import type {
 
 const AUTH_CACHE_TTL_SECONDS = 60;
 
+const IMPLIED_SCOPES: Record<string, string[]> = {
+  "mail:manage": ["mail:read"],
+  "hme:manage": ["hme:read"],
+  "verify:manage": ["verify:read"],
+};
+
+export function expandScopes(scopes: string[]): string[] {
+  const expanded = new Set(scopes);
+  for (const scope of scopes) {
+    for (const implied of IMPLIED_SCOPES[scope] ?? []) expanded.add(implied);
+  }
+  return [...expanded];
+}
+
 export async function sha256Hex(input: string): Promise<string> {
   const data = new TextEncoder().encode(input);
   if (data.byteLength > 16 * 1024) {
@@ -38,7 +52,14 @@ export async function invalidateApiKeyCache(env: Env, keyId: string): Promise<vo
   const row = await env.DB.prepare("SELECT key_hash FROM api_keys WHERE id = ?")
     .bind(keyId)
     .first<{ key_hash: string }>();
-  if (row) await invalidateHashes(env, [row.key_hash]);
+  if (!row) return;
+  const apps = await env.DB.prepare("SELECT app_id FROM api_key_apps WHERE api_key_id = ?")
+    .bind(keyId)
+    .all<{ app_id: string }>();
+  await Promise.all([
+    env.AUTH_CACHE.delete(`auth:${row.key_hash}`),
+    ...apps.results.map((app) => env.AUTH_CACHE.delete(`auth:${row.key_hash}:${app.app_id}`)),
+  ]);
 }
 
 export async function invalidateUserApiKeyCaches(
@@ -46,14 +67,22 @@ export async function invalidateUserApiKeyCaches(
   userId: string,
   appId?: string
 ): Promise<void> {
-  const rows = appId
-    ? await env.DB.prepare("SELECT key_hash FROM api_keys WHERE user_id = ? AND app_id = ?")
-        .bind(userId, appId)
-        .all<{ key_hash: string }>()
-    : await env.DB.prepare("SELECT key_hash FROM api_keys WHERE user_id = ?")
-        .bind(userId)
-        .all<{ key_hash: string }>();
-  await invalidateHashes(env, rows.results.map((row) => row.key_hash));
+  const rows = await env.DB.prepare("SELECT key_hash FROM api_keys WHERE user_id = ?")
+    .bind(userId)
+    .all<{ key_hash: string }>();
+  const hashes = rows.results.map((row) => row.key_hash);
+  const apps = await env.DB.prepare(
+    `SELECT DISTINCT k.key_hash, a.app_id
+     FROM api_keys k
+     JOIN api_key_apps a ON a.api_key_id = k.id
+     WHERE k.user_id = ? ${appId ? "AND a.app_id = ?" : ""}`
+  )
+    .bind(userId, ...(appId ? [appId] : []))
+    .all<{ key_hash: string; app_id: string }>();
+  await Promise.all([
+    invalidateHashes(env, hashes),
+    ...apps.results.map((row) => env.AUTH_CACHE.delete(`auth:${row.key_hash}:${row.app_id}`)),
+  ]);
 }
 
 export async function invalidateGroupApiKeyCaches(
@@ -61,25 +90,34 @@ export async function invalidateGroupApiKeyCaches(
   groupId: string,
   appId?: string
 ): Promise<void> {
-  const rows = appId
-    ? await env.DB.prepare(
-        `SELECT k.key_hash FROM api_keys k
-         JOIN group_members gm ON gm.user_id = k.user_id
-         WHERE gm.group_id = ? AND k.app_id = ?`
-      ).bind(groupId, appId).all<{ key_hash: string }>()
-    : await env.DB.prepare(
-        `SELECT k.key_hash FROM api_keys k
-         JOIN group_members gm ON gm.user_id = k.user_id
-         WHERE gm.group_id = ?`
-      ).bind(groupId).all<{ key_hash: string }>();
-  await invalidateHashes(env, rows.results.map((row) => row.key_hash));
+  const rows = await env.DB.prepare(
+    `SELECT DISTINCT k.key_hash, a.app_id
+     FROM api_keys k
+     JOIN group_members gm ON gm.user_id = k.user_id
+     JOIN api_key_apps a ON a.api_key_id = k.id
+     WHERE gm.group_id = ? ${appId ? "AND a.app_id = ?" : ""}`
+  )
+    .bind(groupId, ...(appId ? [appId] : []))
+    .all<{ key_hash: string; app_id: string }>();
+  await Promise.all(rows.results.flatMap((row) => [
+    env.AUTH_CACHE.delete(`auth:${row.key_hash}`),
+    env.AUTH_CACHE.delete(`auth:${row.key_hash}:${row.app_id}`),
+  ]));
 }
 
 export async function invalidateAppApiKeyCaches(env: Env, appId: string): Promise<void> {
-  const rows = await env.DB.prepare("SELECT key_hash FROM api_keys WHERE app_id = ?")
+  const rows = await env.DB.prepare(
+    `SELECT k.key_hash
+     FROM api_keys k
+     JOIN api_key_apps a ON a.api_key_id = k.id
+     WHERE a.app_id = ?`
+  )
     .bind(appId)
     .all<{ key_hash: string }>();
-  await invalidateHashes(env, rows.results.map((row) => row.key_hash));
+  await Promise.all(rows.results.flatMap((row) => [
+    env.AUTH_CACHE.delete(`auth:${row.key_hash}:${appId}`),
+    env.AUTH_CACHE.delete(`auth:${row.key_hash}`),
+  ]));
 }
 
 /**
@@ -94,7 +132,7 @@ export async function validateApiKey(
 ): Promise<AuthContext | null> {
   if (rawKey.length > 256 || appId.length > 63) return null;
   const keyHash = await sha256Hex(rawKey);
-  const cacheKey = `auth:${keyHash}`;
+  const cacheKey = `auth:${keyHash}:${appId}`;
 
   const cached = await env.AUTH_CACHE.get<
     AuthContext & { credentialExpiresAt?: number | null }
@@ -117,10 +155,11 @@ export async function validateApiKey(
   }
 
   const row = await env.DB.prepare(
-    `SELECT k.id, k.user_id, k.app_id, k.status, k.scopes, k.expires_at
+    `SELECT k.id, k.user_id, a.app_id, k.status, a.scopes, k.expires_at
      FROM api_keys k
+     JOIN api_key_apps a ON a.api_key_id = k.id
      JOIN users u ON u.id = k.user_id
-     WHERE k.key_hash = ? AND k.app_id = ? AND u.status = 'active'`
+     WHERE k.key_hash = ? AND a.app_id = ? AND u.status = 'active'`
   )
     .bind(keyHash, appId)
     .first<{
@@ -161,11 +200,11 @@ export async function validateApiKey(
     .bind(appId, row.user_id, ...groupIds)
     .all<{ scopes: string }>();
 
-  const policyScopes = new Set<string>(
+  const policyScopes = new Set<string>(expandScopes(
     policyRows.results.flatMap((p) => JSON.parse(p.scopes) as string[])
-  );
+  ));
   const keyScopes: string[] = JSON.parse(row.scopes);
-  const effectiveScopes = keyScopes.filter((s) => policyScopes.has(s));
+  const effectiveScopes = expandScopes(keyScopes.filter((s) => policyScopes.has(s)));
 
   const context: AuthContext = {
     method: "api_key",
@@ -196,7 +235,7 @@ export async function validateApiKey(
 }
 
 export async function getPolicyScopes(
-  env: Env,
+  env: Pick<Env, "DB">,
   userId: string,
   appId: string
 ): Promise<{ scopes: string[]; groupIds: string[] } | null> {
@@ -222,14 +261,39 @@ export async function getPolicyScopes(
     .bind(appId, userId, ...groupIds)
     .all<{ scopes: string }>();
 
-  const scopes = [...new Set(
-    policies.results.flatMap((policy) => JSON.parse(policy.scopes) as string[])
-  )];
+  const scopes = expandScopes(policies.results.flatMap(
+    (policy) => JSON.parse(policy.scopes) as string[]
+  ));
   return { scopes, groupIds };
 }
 
+/**
+ * MCP consent scopes normally follow the same D1 policies as API keys.
+ * Account self-service is the deliberate exception: every active Clerk user
+ * can already use these routes without a policy, so MCP may narrow that
+ * existing right through explicit consent but must not require an unrelated
+ * admin-created policy first.
+ */
+export async function getMcpPolicyScopes(
+  env: Pick<Env, "DB">,
+  userId: string,
+  appId: string,
+): Promise<{ scopes: string[]; groupIds: string[] } | null> {
+  const policy = await getPolicyScopes(env, userId, appId);
+  if (!policy) return null;
+  if (appId !== "keys-api") return policy;
+  return {
+    ...policy,
+    scopes: expandScopes([
+      ...policy.scopes,
+      "account:read",
+      "account:limits:request",
+    ]),
+  };
+}
+
 export function checkScope(context: AuthContext, requiredScope: string): CheckResult {
-  if (context.scopes.includes(requiredScope)) {
+  if (expandScopes(context.scopes).includes(requiredScope)) {
     return { allowed: true, status: 200 };
   }
   return { allowed: false, status: 403, reason: "scope-missing" };
@@ -405,11 +469,14 @@ export async function writeAuditLog(
     resourceId?: string;
     result: "allowed" | "denied";
     reason?: string;
+    context?: AuthContext;
   }
 ): Promise<void> {
   await env.DB.prepare(
-    `INSERT INTO audit_log (id, user_id, app_id, api_key_id, action, resource_id, result, reason)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO audit_log
+       (id, user_id, app_id, api_key_id, action, resource_id, result, reason,
+        auth_method, credential_id, client_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       crypto.randomUUID(),
@@ -419,7 +486,10 @@ export async function writeAuditLog(
       entry.action,
       entry.resourceId ?? null,
       entry.result,
-      entry.reason ?? null
+      entry.reason ?? null,
+      entry.context?.method ?? (entry.apiKeyId ? "api_key" : null),
+      entry.context?.credentialId ?? entry.apiKeyId ?? null,
+      entry.context?.clientId ?? null,
     )
     .run()
     .catch(() => {}); // audit logging must never break the request

@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { WorkerEntrypoint } from "cloudflare:workers";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import {
@@ -6,6 +7,7 @@ import {
   checkResourceGrant,
   consumeHardDailyLimit,
   getEffectiveLimit,
+  acceptPrivateMcpDelegation,
 } from "@kitsos/auth";
 import { withTelemetry } from "@kitsos/telemetry";
 import { generateAlias } from "./alias";
@@ -52,7 +54,7 @@ function pagination(limitValue?: string, offsetValue?: string) {
 app.get("/health", (c) => c.json({ ok: true }));
 
 app.get("/aliases", async (c) => {
-  const auth = await authenticate(c.req.raw, c.env, "hme:manage", APP_ID);
+  const auth = await authenticate(c.req.raw, c.env, "hme:read", APP_ID);
   if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
   const page = pagination(c.req.query("limit"), c.req.query("offset"));
   if (!page) return c.json({ error: "invalid-pagination" }, 400);
@@ -269,3 +271,15 @@ export default {
   fetch: instrumented.fetch,
   email,
 };
+
+export class McpEntrypoint extends WorkerEntrypoint<Env> {
+  async fetch(request: Request): Promise<Response> {
+    const delegated = acceptPrivateMcpDelegation(this.env, request);
+    if (!delegated) return Response.json({ error: "invalid-mcp-delegation" }, { status: 401 });
+    return instrumented.fetch!(
+      delegated.request as Request<unknown, IncomingRequestCfProperties>,
+      delegated.env,
+      this.ctx,
+    );
+  }
+}

@@ -1,0 +1,63 @@
+name = "kitsos-mcp"
+main = "src/index.ts"
+compatibility_date = "2026-07-25"
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
+routes = [
+  { pattern = "mcp.api.kitsos.net", custom_domain = true }
+]
+
+[vars]
+# Clerk publishable keys are intentionally public and are embedded in the UI.
+CLERK_PUBLISHABLE_KEY = "pk_live_Y2xlcmsua2l0c29zLm5ldCQ"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "kitsos-api"
+database_id = "c5ccab68-5f60-4b28-8ce9-20c57b8622ea"
+
+[[kv_namespaces]]
+binding = "AUTH_CACHE"
+id = "86fb5bad46c6458d91cbb322b7178ccf"
+
+[[kv_namespaces]]
+binding = "USAGE_COUNTERS"
+id = "4823ab0d3fd6452e8437631a3717f2b5"
+
+# OAuth codes, grants, tokens, registered MCP clients and short-lived consent
+# state share this dedicated namespace, separate from API-key auth caching.
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "37fcac34026245f1be55f5df73f7cff6"
+
+[[services]]
+binding = "MAIL"
+service = "mail"
+entrypoint = "McpEntrypoint"
+
+[[services]]
+binding = "HIDE_MY_EMAIL"
+service = "hide-my-email"
+entrypoint = "McpEntrypoint"
+
+[[services]]
+binding = "UTILITY"
+service = "utility"
+entrypoint = "McpEntrypoint"
+
+[[services]]
+binding = "VERIFY"
+service = "verify"
+entrypoint = "McpEntrypoint"
+
+[[services]]
+binding = "KEYS_API"
+service = "keys-api"
+entrypoint = "McpEntrypoint"
+
+[[services]]
+binding = "IDENTITY"
+service = "keys-api"
+entrypoint = "McpIdentityEntrypoint"
+
+# Clerk verification runs in the private keys-api identity entrypoint, which
+# already owns CLERK_SECRET_KEY. The MCP Worker needs no private Clerk secret.

@@ -1,7 +1,14 @@
 import { Hono } from "hono";
+import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Context } from "hono";
 import { cors } from "hono/cors";
-import { authenticateApiKey, checkRateLimit, withRetryAfter } from "@kitsos/auth";
+import {
+  acceptPrivateMcpDelegation,
+  authenticate,
+  authenticateApiKey,
+  checkRateLimit,
+  withRetryAfter,
+} from "@kitsos/auth";
 import { withTelemetry } from "@kitsos/telemetry";
 import type { Env } from "./env";
 
@@ -44,6 +51,17 @@ function validDnsName(name: string) {
 }
 
 async function authorize(c: UtilityContext, scope: string): Promise<Response | null> {
+  if (c.env.MCP_DELEGATION) {
+    const auth = await authenticate(c.req.raw, c.env, scope, APP_ID, KEY_RATE_LIMIT);
+    if (!auth.allowed) {
+      return withRetryAfter(
+        c.json({ error: auth.reason }, auth.status as 401 | 403 | 429),
+        auth,
+      );
+    }
+    c.set("authenticated", true);
+    return null;
+  }
   if (!c.req.header("Authorization")) {
     const rate = await checkRateLimit(c.env, `utility:public:${clientIp(c.req.raw)}`, PUBLIC_RATE_LIMIT);
     if (!rate.allowed) return withRetryAfter(c.json({ error: "public-rate-limit-exceeded", message: "The public limit is exhausted. Use a Kitsos API key for higher limits." }, 429), rate);
@@ -210,4 +228,18 @@ app.get("/dns/:provider", (c) => {
 });
 
 app.get("/health", (c) => c.json({ ok: true }));
-export default withTelemetry(app, "utility");
+const instrumented = withTelemetry(app, "utility");
+
+export class McpEntrypoint extends WorkerEntrypoint<Env> {
+  async fetch(request: Request): Promise<Response> {
+    const delegated = acceptPrivateMcpDelegation(this.env, request);
+    if (!delegated) return Response.json({ error: "invalid-mcp-delegation" }, { status: 401 });
+    return instrumented.fetch!(
+      delegated.request as Request<unknown, IncomingRequestCfProperties>,
+      delegated.env,
+      this.ctx,
+    );
+  }
+}
+
+export default instrumented;

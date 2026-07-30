@@ -1,5 +1,10 @@
 import type { Context, Next } from "hono";
-import { checkRateLimit, verifyClerkSession, ensureUserRow } from "@kitsos/auth";
+import {
+  authenticate,
+  checkRateLimit,
+  verifyClerkSession,
+  ensureUserRow,
+} from "@kitsos/auth";
 import type { Env } from "./env";
 
 type ContextEnv = { Bindings: Env; Variables: { userId: string } };
@@ -43,6 +48,23 @@ export async function requireAdmin(c: Context<ContextEnv>, next: Next) {
 
 /** Only requires a valid Clerk session — for self-service routes. */
 export async function requireUser(c: Context<ContextEnv>, next: Next) {
+  if (c.env.MCP_DELEGATION) {
+    const path = new URL(c.req.url).pathname;
+    if (path.includes("/api-keys")) {
+      return c.json({ error: "mcp-api-key-management-disabled" }, 403);
+    }
+    const requiredScope =
+      c.req.method === "POST" && path.endsWith("/limit-increase-requests")
+        ? "account:limits:request"
+        : "account:read";
+    const auth = await authenticate(c.req.raw, c.env, requiredScope, "keys-api");
+    if (!auth.allowed || !auth.context) {
+      return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
+    }
+    c.set("userId", auth.context.userId);
+    await next();
+    return;
+  }
   const authHeader = c.req.header("Authorization") ?? "";
   const token = authHeader.replace(/^Bearer\s+/i, "");
   if (!token) return c.json({ error: "missing-credentials" }, 401);

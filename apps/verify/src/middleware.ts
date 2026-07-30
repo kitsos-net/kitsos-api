@@ -1,5 +1,10 @@
 import type { Context, Next } from "hono";
-import { checkRateLimit, verifyClerkSession, ensureUserRow } from "@kitsos/auth";
+import {
+  authenticate,
+  checkRateLimit,
+  verifyClerkSession,
+  ensureUserRow,
+} from "@kitsos/auth";
 import type { Env } from "./env";
 
 type ContextEnv = { Bindings: Env; Variables: { userId: string } };
@@ -7,6 +12,16 @@ type ContextEnv = { Bindings: Env; Variables: { userId: string } };
 export async function requireUser(c: Context<ContextEnv>, next: Next) {
   const authHeader = c.req.header("Authorization") ?? "";
   const token = authHeader.replace(/^Bearer\s+/i, "");
+  if (c.env.MCP_DELEGATION || token.startsWith("kitsos_")) {
+    const requiredScope = c.req.method === "GET" ? "verify:read" : "verify:manage";
+    const auth = await authenticate(c.req.raw, c.env, requiredScope, "verify");
+    if (!auth.allowed || !auth.context) {
+      return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
+    }
+    c.set("userId", auth.context.userId);
+    await next();
+    return;
+  }
   if (!token) return c.json({ error: "missing-credentials" }, 401);
   if (token.length > 8192) return c.json({ error: "invalid-credentials" }, 401);
 
