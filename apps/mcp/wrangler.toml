@@ -61,3 +61,7 @@ entrypoint = "McpIdentityEntrypoint"
 
 # Clerk verification runs in the private keys-api identity entrypoint, which
 # already owns CLERK_SECRET_KEY. The MCP Worker needs no private Clerk secret.
+#
+# Required Axiom tracing secrets, matching the other API workers:
+#   AXIOM_TOKEN
+#   AXIOM_DATASET

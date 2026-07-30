@@ -8,7 +8,7 @@ contains:
 | --- | --- |
 | `service.name` | Kitsos API (`mail`, `verify`, `keys-api`, `utility`, …) |
 | `attributes.custom["kitsos.user.id"]` | Internal Clerk user ID |
-| `attributes.custom["kitsos.auth.method"]` | `api_key` or `session` |
+| `attributes.custom["kitsos.auth.method"]` | `api_key`, `session`, or `mcp` |
 | `attributes.custom["kitsos.api_key.id"]` | Internal key ID, if used |
 | `attributes.custom["kitsos.request.scope"]` | Scope checked for the request |
 | `attributes.custom["kitsos.event.name"]` | Last semantic event on the request |
@@ -22,6 +22,8 @@ Valid API-key requests contain `kitsos.api_key.id`. Invalid keys contain only
 a 16-character SHA-256 fingerprint so repeated attempts can be correlated.
 No email address, raw API key, full API-key hash, authorization header,
 confirmation token, webhook secret, or request body is added to telemetry.
+Authenticated requests to the MCP endpoint use `service.name = "mcp"` and
+carry the same user and authentication dimensions as the other API workers.
 
 ## Semantic events
 
