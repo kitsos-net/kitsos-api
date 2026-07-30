@@ -43,6 +43,12 @@ export const LIMIT_DEFINITIONS = {
     maximumValue: 1_000,
     daily: false,
   },
+  mcp_connections: {
+    appId: "keys-api",
+    defaultValue: 10,
+    maximumValue: 100,
+    daily: false,
+  },
 } as const;
 
 export type LimitType = keyof typeof LIMIT_DEFINITIONS;
@@ -65,7 +71,7 @@ export function isValidLimitConfiguration(
 }
 
 export async function getEffectiveLimit(
-  env: Env,
+  env: Pick<Env, "DB">,
   userId: string,
   limitType: LimitType
 ): Promise<number> {

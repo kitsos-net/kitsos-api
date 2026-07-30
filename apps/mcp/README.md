@@ -48,16 +48,18 @@ description, narrow or restore scopes within the originally approved grant, and
 revoke a connection. A completely new scope still requires a fresh OAuth
 authorization, so a connected client can never silently gain more access.
 
-Each user can have at most 10 active MCP connections. Existing OAuth grants are
+Each user can have 10 active MCP connections by default. Users may request a
+per-account increase through the existing Kitsos limit-increase flow; admins can
+approve up to the hard maximum of 100 connections. Existing OAuth grants are
 reconciled into D1 when the connection UI or a new consent flow is opened.
 
 ## Limits and input hardening
 
-- MCP traffic: 120 requests/minute per connection and 300/minute per user,
+- MCP traffic: 60 requests/minute per connection and 120/minute per user,
   in addition to the product Workers' endpoint-specific limits
-- Dynamic client registration: 10 requests/hour per source IP
-- OAuth authorization: 30 requests/minute per source IP
-- OAuth token endpoint: 60 requests/minute per source IP
+- Dynamic client registration: 5 requests/hour per source IP
+- OAuth authorization: 15 requests/minute per source IP
+- OAuth token endpoint: 30 requests/minute per source IP
 - Client registration bodies: 32 KiB; OAuth token and Kitsos UI writes: 16 KiB
 - MCP POST bodies with a declared size: 256 KiB
 - Client names: 100 characters; private descriptions: 500 characters

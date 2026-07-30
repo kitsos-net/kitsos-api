@@ -42,11 +42,11 @@ async function publicEndpointRateLimit(
   pathname: string,
 ): Promise<Response | null> {
   const options = pathname === "/register"
-    ? { windowSeconds: 60 * 60, maxRequests: 10 }
+    ? { windowSeconds: 60 * 60, maxRequests: 5 }
     : pathname === "/token"
-      ? { windowSeconds: 60, maxRequests: 60 }
+      ? { windowSeconds: 60, maxRequests: 30 }
       : pathname === "/authorize"
-        ? { windowSeconds: 60, maxRequests: 30 }
+        ? { windowSeconds: 60, maxRequests: 15 }
         : null;
   if (!options) return null;
   const result = await checkRateLimit(
@@ -167,7 +167,7 @@ export class McpApiHandler extends WorkerEntrypoint<Env, McpProps> {
     const connectionRate = await checkRateLimit(
       this.env,
       `mcp-server:connection:${props.delegationId}`,
-      { windowSeconds: 60, maxRequests: 120 },
+      { windowSeconds: 60, maxRequests: 60 },
     );
     if (!connectionRate.allowed) {
       return rateLimitResponse(connectionRate.retryAfterSeconds);
@@ -175,7 +175,7 @@ export class McpApiHandler extends WorkerEntrypoint<Env, McpProps> {
     const userRate = await checkRateLimit(
       this.env,
       `mcp-server:user:${props.userId}`,
-      { windowSeconds: 60, maxRequests: 300 },
+      { windowSeconds: 60, maxRequests: 120 },
     );
     if (!userRate.allowed) return rateLimitResponse(userRate.retryAfterSeconds);
     const scopes = await effectiveMcpScopes(
