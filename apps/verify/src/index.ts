@@ -133,6 +133,117 @@ async function grantAccess(
   return result.meta.changes === 1;
 }
 
+type ResourceDependencySummary = {
+  mailWebhooks: number;
+  hmeAliases: number;
+};
+
+async function getResourceForDeletion(
+  env: Env,
+  resourceId: string,
+  userId?: string,
+): Promise<{
+  app_id: string;
+  resource_type: string;
+  value: string;
+  dependencies: ResourceDependencySummary;
+} | null> {
+  const resource = await env.DB.prepare(
+    `SELECT r.app_id, r.resource_type, r.value
+     FROM resources r
+     WHERE r.id = ?
+       ${userId ? `AND (
+         EXISTS (
+           SELECT 1 FROM resource_verifications rv
+           WHERE rv.resource_id = r.id AND rv.user_id = ?
+         )
+         OR EXISTS (
+           SELECT 1 FROM resource_grants rg
+           WHERE rg.resource_id = r.id AND rg.user_id = ?
+         )
+       )` : ""}`
+  )
+    .bind(resourceId, ...(userId ? [userId, userId] : []))
+    .first<{ app_id: string; resource_type: string; value: string }>();
+  if (!resource) return null;
+
+  const dependencyOwnerClause = userId ? "AND user_id = ?" : "";
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      `SELECT COUNT(*) AS count
+       FROM mail_webhooks
+       WHERE ? = 'mail' AND ? = 'email_address'
+         AND lower(from_address) = lower(?)
+         ${dependencyOwnerClause}`
+    ).bind(
+      resource.app_id,
+      resource.resource_type,
+      resource.value,
+      ...(userId ? [userId] : []),
+    ),
+    env.DB.prepare(
+      `SELECT COUNT(*) AS count
+       FROM hme_aliases
+       WHERE ? = 'hide-my-email' AND ? = 'email_address'
+         AND lower(forward_to) = lower(?)
+         ${dependencyOwnerClause}`
+    ).bind(
+      resource.app_id,
+      resource.resource_type,
+      resource.value,
+      ...(userId ? [userId] : []),
+    ),
+  ]);
+  return {
+    ...resource,
+    dependencies: {
+      mailWebhooks: Number((results[0].results[0] as { count?: number })?.count ?? 0),
+      hmeAliases: Number((results[1].results[0] as { count?: number })?.count ?? 0),
+    },
+  };
+}
+
+function resourceIsInUse(dependencies: ResourceDependencySummary): boolean {
+  return dependencies.mailWebhooks > 0 || dependencies.hmeAliases > 0;
+}
+
+async function deleteResourceOwnership(
+  env: Env,
+  resourceId: string,
+  userId?: string,
+): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare(
+      `DELETE FROM api_key_resource_grants
+       WHERE resource_id = ?
+         ${userId ? `AND api_key_id IN (
+           SELECT id FROM api_keys WHERE user_id = ?
+         )` : ""}`
+    ).bind(resourceId, ...(userId ? [userId] : [])),
+    env.DB.prepare(
+      `DELETE FROM resource_verifications
+       WHERE resource_id = ? ${userId ? "AND user_id = ?" : ""}`
+    ).bind(resourceId, ...(userId ? [userId] : [])),
+    env.DB.prepare(
+      `DELETE FROM resource_grants
+       WHERE resource_id = ? ${userId ? "AND user_id = ?" : ""}`
+    ).bind(resourceId, ...(userId ? [userId] : [])),
+    env.DB.prepare(
+      `DELETE FROM resources
+       WHERE id = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM resource_verifications WHERE resource_id = ?
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM resource_grants WHERE resource_id = ?
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM api_key_resource_grants WHERE resource_id = ?
+         )`
+    ).bind(resourceId, resourceId, resourceId, resourceId),
+  ]);
+}
+
 // ============================================================
 // Self-service — /resources
 // ============================================================
@@ -168,6 +279,29 @@ resources.get("/", async (c) => {
     .bind(userId, userId, page.limit, page.offset)
     .all();
   return c.json(r.results);
+});
+
+resources.delete("/:resourceId", async (c) => {
+  const userId = c.get("userId");
+  const resourceId = c.req.param("resourceId");
+  const resource = await getResourceForDeletion(c.env, resourceId, userId);
+  if (!resource) return c.json({ error: "not-found" }, 404);
+  if (resourceIsInUse(resource.dependencies)) {
+    return c.json({
+      error: "resource-in-use",
+      dependencies: resource.dependencies,
+      message: "Delete or reconfigure the dependent objects before deleting this resource.",
+    }, 409);
+  }
+  try {
+    await deleteResourceOwnership(c.env, resourceId, userId);
+  } catch (error) {
+    if (String(error).includes("resource-in-use")) {
+      return c.json({ error: "resource-in-use" }, 409);
+    }
+    throw error;
+  }
+  return c.body(null, 204);
 });
 
 // Register a resource + start a verification attempt
@@ -284,6 +418,9 @@ resources.post("/", async (c) => {
            AND NOT EXISTS (
              SELECT 1 FROM resource_grants rg WHERE rg.resource_id = r.id
            )
+           AND NOT EXISTS (
+             SELECT 1 FROM api_key_resource_grants agr WHERE agr.resource_id = r.id
+           )
          LIMIT 100
        )`
     ),
@@ -349,8 +486,11 @@ resources.post("/", async (c) => {
            )
            AND NOT EXISTS (
              SELECT 1 FROM resource_grants WHERE resource_id = ?
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM api_key_resource_grants WHERE resource_id = ?
            )`
-      ).bind(resourceId, resourceId, resourceId),
+      ).bind(resourceId, resourceId, resourceId, resourceId),
     ]);
     return c.json({ error: "verification-email-failed" }, 502);
   }
@@ -485,11 +625,23 @@ admin.get("/resources", async (c) => {
 
 admin.delete("/resources/:resourceId", async (c) => {
   const resourceId = c.req.param("resourceId");
-  await c.env.DB.batch([
-    c.env.DB.prepare("DELETE FROM resource_grants WHERE resource_id = ?").bind(resourceId),
-    c.env.DB.prepare("DELETE FROM resource_verifications WHERE resource_id = ?").bind(resourceId),
-    c.env.DB.prepare("DELETE FROM resources WHERE id = ?").bind(resourceId),
-  ]);
+  const resource = await getResourceForDeletion(c.env, resourceId);
+  if (!resource) return c.json({ error: "not-found" }, 404);
+  if (resourceIsInUse(resource.dependencies)) {
+    return c.json({
+      error: "resource-in-use",
+      dependencies: resource.dependencies,
+      message: "Delete or reconfigure the dependent objects before deleting this resource.",
+    }, 409);
+  }
+  try {
+    await deleteResourceOwnership(c.env, resourceId);
+  } catch (error) {
+    if (String(error).includes("resource-in-use")) {
+      return c.json({ error: "resource-in-use" }, 409);
+    }
+    throw error;
+  }
   return c.body(null, 204);
 });
 

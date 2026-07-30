@@ -63,6 +63,11 @@ Creation churn is additionally capped at 100 API keys, 100 templates,
 day. HME forwarding is capped at 1,000 messages per alias and 5,000 messages
 per user per UTC day. These limits are not overridable.
 
+API-key rotation consumes the same 100-per-day hard key-creation churn budget.
+It is an atomic one-for-one replacement, so it cannot increase or bypass the
+user's stored `api_keys` product limit. The old key is rejected against D1
+immediately even if an authentication result exists in the 60-second KV cache.
+
 Expired API keys are removed before counting. Expired verification attempts
 and unreferenced resources are cleaned up opportunistically, and revoked API
 keys are deleted after their authentication cache entry is invalidated. D1
@@ -70,6 +75,10 @@ also enforces rolling per-user retention of 31 days for daily counters,
 10,000 audit entries, 1,000 unreferenced verification-history rows, and 1,000
 reviewed limit-increase requests. Pending requests and verification rows tied
 to active grants are never removed by retention.
+
+Deleting a verified resource does not cascade into mail webhooks or HME
+aliases. Those dependencies produce a conflict until they are deleted or
+reconfigured; shared resource ownership belonging to other users is preserved.
 
 ## Cloudflare edge limit
 

@@ -397,6 +397,28 @@ paths:
       responses:
         "204": { description: No Content }
 
+  /admin/api-keys/{keyId}/rotate:
+    post:
+      summary: Rotate any active API key without changing its permissions or metadata
+      description: >
+        Atomically creates a replacement with the same owner, app permissions,
+        name, description, expiry, and automatic-roll metadata, then revokes
+        the old credential. The new raw key is returned only in this response.
+        Rotation consumes the same hard daily key-creation budget as creation,
+        but is a one-for-one replacement for the stored-key product limit.
+      tags: [admin]
+      parameters:
+        - { name: keyId, in: path, required: true, schema: { type: string } }
+      responses:
+        "201":
+          description: Rotated; the old key is no longer valid
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiKeyCreated' }
+        "404": { description: Key not found, revoked, or expired }
+        "409": { description: The key changed concurrently or has no canonical app permissions }
+        "429": { description: Hard daily key-creation churn limit exceeded }
+
   /admin/usage-limits:
     get:
       summary: List usage limits
@@ -580,6 +602,27 @@ paths:
         - { name: keyId, in: path, required: true, schema: { type: string } }
       responses:
         "204": { description: No Content }
+
+  /me/api-keys/{keyId}/rotate:
+    post:
+      summary: Rotate one of your active API keys
+      description: >
+        Atomically replaces the key while preserving its multi-app permissions,
+        name, description, expiry, and automatic-roll metadata. The old key is
+        revoked and the new raw key is returned only once. This endpoint is
+        unavailable through MCP delegation.
+      tags: [self-service]
+      parameters:
+        - { name: keyId, in: path, required: true, schema: { type: string } }
+      responses:
+        "201":
+          description: Rotated; save the returned raw key now
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiKeyCreated' }
+        "404": { description: Own active, unexpired key not found }
+        "409": { description: The key changed concurrently or has no canonical app permissions }
+        "429": { description: Hard daily key-creation churn limit exceeded }
 
   /me/limit-increase-requests:
     get:

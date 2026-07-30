@@ -32,8 +32,16 @@ produces.
 Magic-link tokens are stored only as SHA-256 hashes and expire after
 30 minutes. DNS challenges expire after 24 hours.
 
-## Known gaps
+## Deletion semantics
 
-- No cron job yet to warn users before `reverify_due_at` /
-  auto-expire grants past `grace_expires_at` — that's the planned
-  `cron` worker's job
+`DELETE /resources/:resourceId` removes only the authenticated user's grant,
+verification history, and legacy API-key resource links. A shared canonical
+resource row remains while another user still owns it. The endpoint returns
+`409 resource-in-use` when one of that user's mail webhooks uses the verified
+address as its sender or an HME alias uses it as its forwarding destination.
+There is deliberately no product-object cascade: reconfigure or delete those
+objects first. The database trigger enforces the same rule if deletion races
+with product-object creation. Admin deletion uses the same conflict rule.
+
+Re-verification reminders are outside this closed platform increment; expiry
+is already enforced by `@kitsos/auth` at use time.

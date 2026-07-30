@@ -138,11 +138,31 @@ export async function validateApiKey(
     AuthContext & { credentialExpiresAt?: number | null }
   >(cacheKey, "json").catch(() => null);
   if (cached) {
+    // D1 remains the revocation source of truth. Checking this compact row on
+    // a cache hit prevents a deleted or rotated key from remaining usable for
+    // the cache TTL while still avoiding the policy/group reads on the hot
+    // path.
+    const current = cached.apiKeyId
+      ? await env.DB.prepare(
+        `SELECT k.expires_at
+         FROM api_keys k
+         JOIN api_key_apps a ON a.api_key_id = k.id
+         JOIN users u ON u.id = k.user_id
+         WHERE k.id = ? AND k.key_hash = ? AND a.app_id = ?
+           AND k.status = 'active' AND u.status = 'active'`
+      )
+        .bind(cached.apiKeyId, keyHash, appId)
+        .first<{ expires_at: number | null }>()
+      : null;
+    if (!current) {
+      await env.AUTH_CACHE.delete(cacheKey).catch(() => {});
+      return null;
+    }
     if (
-      cached.credentialExpiresAt
-      && cached.credentialExpiresAt <= Math.floor(Date.now() / 1000)
+      current.expires_at
+      && current.expires_at <= Math.floor(Date.now() / 1000)
     ) {
-      await env.AUTH_CACHE.delete(cacheKey);
+      await env.AUTH_CACHE.delete(cacheKey).catch(() => {});
       if (cached.apiKeyId) {
         await env.DB.prepare("DELETE FROM api_keys WHERE id = ? AND expires_at <= unixepoch()")
           .bind(cached.apiKeyId)

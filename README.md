@@ -36,6 +36,10 @@ sender grant, template, and isolated mail quota; migration 0011 moves that
 sender to `verify@notify.kitsos.net`.
 Migration 0012 adds canonical multi-app API-key permissions, MCP-exposable
 scope metadata and authentication provenance in the audit log.
+Migration 0013 replaces the legacy Utility umbrella policy with the four
+concrete Utility scopes. Migration 0014 adds bounded, user-managed MCP
+connections. Migration 0015 enforces dependency-safe verified resource
+deletion; key rotation itself uses the existing schema.
 
 See [`apps/mcp/README.md`](./apps/mcp/README.md) for the MCP authorization
 model, deployment order and the explicit exclusion of Analytics, admin
