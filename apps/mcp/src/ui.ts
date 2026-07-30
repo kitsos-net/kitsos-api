@@ -1,5 +1,4 @@
 const STYLE = String.raw`
-@font-face{font-family:"Kitsos Default";src:url("https://cdn.kitsos.net/fonts/kitsos-default/kitsos-default-regular.woff2") format("woff2"),url("https://cdn2.kitsos.net/fonts/kitsos-default/kitsos-default-regular.woff2") format("woff2"),url("https://cdn3.kitsos.net/fonts/kitsos-default/kitsos-default-regular.woff2") format("woff2");font-style:normal;font-weight:400;font-display:swap}
 :root{color-scheme:light dark;--primary:#0768bb;--primary-hover:#055a9f;--primary-soft:#e7f2fc;--bg:#f7f9fc;--surface:#fff;--raised:#fff;--text:#111827;--muted:#52606d;--border:#dce5ee;--success:#12805c;--warning:#a85e00;--danger:#c52b3a;--focus:#9ed5ff;--shadow:0 8px 24px rgb(15 35 55 / 10%);--control:10px;--card:12px;--font:"Kitsos Default",Arial,Helvetica,sans-serif}
 *{box-sizing:border-box}
 body{margin:0;min-height:100vh;background:var(--bg);color:var(--text);font:16px/1.5 var(--font)}
@@ -62,7 +61,45 @@ const page = document.body.dataset.page;
 const csrf = document.body.dataset.csrf || "";
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\\\"":"&quot;","'":"&#039;"}[c]));
+const CDN_TIMEOUT_MS = 1500;
+const CDN_FONT_PATH = "/fonts/kitsos-default/kitsos-default-regular.woff2";
 let loaded = false;
+function fallbackCdnHosts() {
+  const hosts = ["cdn2.kitsos.net", "cdn3.kitsos.net"];
+  const random = crypto.getRandomValues(new Uint32Array(1))[0];
+  return random % 2 === 0 ? hosts : hosts.reverse();
+}
+async function loadFont(host) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CDN_TIMEOUT_MS);
+  try {
+    const response = await fetch("https://" + host + CDN_FONT_PATH, {
+      cache: "force-cache",
+      mode: "cors",
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error("font-unavailable");
+    const data = await response.arrayBuffer();
+    const face = new FontFace("Kitsos Default", data, {
+      style: "normal",
+      weight: "400",
+    });
+    await face.load();
+    document.fonts.add(face);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+async function loadBrandFont() {
+  if (!("FontFace" in window) || !document.fonts) return;
+  for (const host of ["cdn.kitsos.net", ...fallbackCdnHosts()]) {
+    if (await loadFont(host)) return;
+  }
+}
+void loadBrandFont();
 function showError(message) {
   const node = $("#status");
   node.textContent = message || "Die Anfrage konnte nicht verarbeitet werden.";
@@ -332,7 +369,7 @@ export function securityHeaders(nonce: string, publishableKey: string): Headers 
       "default-src 'none'",
       `script-src 'nonce-${nonce}' https://${clerkDomain}`,
       `style-src 'nonce-${nonce}' 'unsafe-inline'`,
-      `connect-src 'self' https://${clerkDomain} https://api.clerk.com`,
+      `connect-src 'self' https://cdn.kitsos.net https://cdn2.kitsos.net https://cdn3.kitsos.net https://${clerkDomain} https://api.clerk.com`,
       `img-src 'self' data: https://cdn.kitsos.net https://${clerkDomain}`,
       `font-src https://cdn.kitsos.net https://cdn2.kitsos.net https://cdn3.kitsos.net https://${clerkDomain}`,
       `frame-src https://${clerkDomain}`,

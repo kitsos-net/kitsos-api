@@ -64,12 +64,12 @@ Clerk session token to the private `McpIdentityEntrypoint` service binding on
 
 ## Design assets
 
-The consent and connections pages follow the Kitsos design system. The webfont
-uses the documented ordered browser fallback from `cdn.kitsos.net` to
-`cdn2.kitsos.net` and then `cdn3.kitsos.net`, with the system font stack as the
-final fallback. Logos and favicons intentionally keep the single public
-`cdn.kitsos.net` URL: their origin failover belongs behind that hostname in the
-central CDN/load balancer rather than in page JavaScript.
+The consent and connections pages follow the Kitsos design system. The browser
+loads the brand font from `cdn.kitsos.net` with a 1.5-second timeout. If that
+request fails or exceeds the timeout, it chooses `cdn2.kitsos.net` or
+`cdn3.kitsos.net` with equal probability. If the selected fallback fails, the
+other fallback is attempted. If all three fail, no webfont is installed and
+the existing Arial/Helvetica system-font stack remains active.
 
 ## Local checks
 
