@@ -50,7 +50,7 @@ export async function requireAdmin(c: Context<ContextEnv>, next: Next) {
 export async function requireUser(c: Context<ContextEnv>, next: Next) {
   if (c.env.MCP_DELEGATION) {
     const path = new URL(c.req.url).pathname;
-    if (path.includes("/api-keys")) {
+    if (path.includes("/api-keys") || path.endsWith("/session-api-key")) {
       return c.json({ error: "mcp-api-key-management-disabled" }, 403);
     }
     const requiredScope =

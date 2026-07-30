@@ -23,6 +23,12 @@ Keys may authorize several applications through
 `appId`/`scopes` input remains accepted for compatibility; list responses
 always include canonical `permissions`.
 
+`POST /me/session-api-key` is the API Console-specific convenience flow.
+It accepts one or more of `mail`, `hide-my-email`, `verify`, and `utility`,
+derives each app's scopes from the signed-in user's current policies, and
+returns a single key with a server-enforced five-minute expiry. Issuing a
+new Console session key revokes the user's previous one.
+
 - `/analytics/*` — machine-to-machine endpoints for Grafana. They accept
   **only** a `kitsos_` API key for the `analytics` app with the
   `analytics:read` scope whose owner is an active member of
@@ -80,7 +86,9 @@ Then set `ADMIN_GROUP_ID=admins` as a secret.
 | GET | `/analytics/top-apps?limit=` | API key: `analytics:read` |
 | GET | `/analytics/api-calls?from=&to=&groupBy=app\|user` | API key: `analytics:read` |
 | GET | `/me` | own user row |
+| GET | `/me/limits` | effective limits and current usage |
 | GET/POST | `/me/api-keys` | self-service, scope-limited |
+| POST | `/me/session-api-key` | five-minute multi-app API Console key |
 | DELETE | `/me/api-keys/:keyId` | own keys only |
 | GET/POST | `/me/limit-increase-requests` | |
 
