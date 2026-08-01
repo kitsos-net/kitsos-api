@@ -2,6 +2,8 @@
 
 `verify.api.kitsos.net/v1` — resource ownership verification (DNS-TXT or
 magic-link), the gate before any `resource_grants` row gets created.
+Ownership is global: one verification is reusable by every current and future
+Kitsos app. App scopes still authorize product actions separately.
 `dns-manager`, `hide-my-email`, etc. all check grants via
 `@kitsos/auth`'s `checkResourceGrant()` against what this worker
 produces.
@@ -10,7 +12,7 @@ produces.
 
 **DNS-TXT** (e.g. verifying you own `domain.de`):
 
-1. `POST /resources` with `{appId, resourceType: "zone", value: "domain.de", method: "dns_txt", scopes: [...]}`
+1. `POST /resources` with `{resourceType: "zone", value: "domain.de", method: "dns_txt"}`
    → returns the TXT record name + value to add
 2. Add `_kitsos-verify.domain.de TXT "kitsos-verify=<token>"` at your DNS provider
 3. `POST /resources/:id/check-dns` → polls via Cloudflare DoH, marks

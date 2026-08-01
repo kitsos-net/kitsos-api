@@ -12,11 +12,12 @@ worker — imported directly into each app (`dns-manager`, `hide-my-email`,
 2. **Scope check** — effective scopes are the intersection of what the
    API key was issued with and what the user's/group's policy allows
    for that app. A key can only narrow permissions, never widen them.
-3. **Resource grants (ReBAC)** — `checkResourceGrant()` for
-   per-resource authorization (e.g. "can this user manage DNS zone
+3. **Resource ownership (ReBAC)** — `checkResourceGrant()` for
+   globally verified ownership (e.g. "has this user verified DNS zone
    `domain.de`"), tied to a `resource_verifications` row so an
    expired-and-not-renewed verification revokes access after its
-   grace period.
+   grace period. Product permissions remain app-specific and are checked
+   separately by `authenticate()`.
 4. **Rate limiting** — atomic fixed-window counters in D1.
 5. **Usage limits** — daily/period budgets per user+app+limit_type,
    configurable per user via `usage_limits.is_override`, with
@@ -41,7 +42,7 @@ export default {
     }
 
     const grant = await checkResourceGrant(
-      env, auth.context!, "zone", "domain.de", "dns:record:write"
+      env, auth.context!, "zone", "domain.de"
     );
     if (!grant.allowed) {
       return new Response(grant.reason, { status: grant.status });

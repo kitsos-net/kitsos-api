@@ -3,7 +3,9 @@ info:
   title: Kitsos Verify API
   description: >
     Resource ownership verification (DNS-TXT or magic link) — the gate
-    before any resource_grants row gets created. Every route except
+    before any resource_grants row gets created. A verified resource is
+    global to the owner and can be used by every current and future app;
+    app authorization is enforced separately. Every route except
     the health check and the magic-link confirm endpoint requires a
     Clerk session, a scoped Verify API key, or a private MCP delegation.
     Magic links are sent only to the email address being verified and
@@ -32,7 +34,6 @@ components:
       type: object
       properties:
         id: { type: string }
-        app_id: { type: string }
         resource_type: { type: string }
         value: { type: string, maxLength: 320 }
         method: { type: string, enum: [dns_txt, magic_link] }
@@ -75,16 +76,14 @@ paths:
           application/json:
             schema:
               type: object
-              required: [appId, resourceType, value, method, scopes]
+              required: [resourceType, value, method]
               properties:
-                appId: { type: string, maxLength: 63 }
                 resourceType: { type: string, maxLength: 64, example: zone }
                 value: { type: string, maxLength: 320, example: domain.de }
                 method:
                   type: string
                   enum: [dns_txt, magic_link]
                   description: magic_link requires resourceType=email_address; dns_txt requires a DNS hostname.
-                scopes: { type: array, minItems: 1, maxItems: 100, items: { type: string, maxLength: 100 } }
       responses:
         "201":
           description: >

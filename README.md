@@ -25,7 +25,7 @@ criteria for introducing `/v2`.
 
 See `packages/auth/README.md` for the auth model. The database schema is
 defined by the ordered migrations `packages/auth/0001_init.sql` through
-`packages/auth/0015_key_rotation_and_resource_deletion.sql`.
+`packages/auth/0016_global_verified_resources.sql`.
 
 Migration 0006 invalidates pending legacy plaintext verification tokens;
 migration 0007 adds atomic product counters and retention; migration 0008
@@ -39,7 +39,8 @@ scope metadata and authentication provenance in the audit log.
 Migration 0013 replaces the legacy Utility umbrella policy with the four
 concrete Utility scopes. Migration 0014 adds bounded, user-managed MCP
 connections. Migration 0015 enforces dependency-safe verified resource
-deletion; key rotation itself uses the existing schema.
+deletion; key rotation itself uses the existing schema. Migration 0016 makes
+verified ownership global across current and future apps.
 
 See [`apps/mcp/README.md`](./apps/mcp/README.md) for the MCP authorization
 model, deployment order and the explicit exclusion of Analytics, admin
