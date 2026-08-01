@@ -31,8 +31,10 @@ app.use("*", bodyLimit({
 app.use("*", cors({
   origin: (origin, c) => {
     const configured = (c.env as Env).CORS_ORIGINS
-      ?? "https://apidev.kitsos.net,https://myaccount.kitsos.net,https://docs.api.kitsos.net";
-    return configured.split(",").map((item) => item.trim()).includes(origin) ? origin : null;
+      ?? "https://apidev.kitsos.net,https://myaccount.kitsos.net";
+    const allowedOrigins = configured.split(",").map((item) => item.trim());
+    allowedOrigins.push("https://docs.api.kitsos.net");
+    return allowedOrigins.includes(origin) ? origin : null;
   },
   allowHeaders: ["Authorization", "Content-Type"],
   allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
