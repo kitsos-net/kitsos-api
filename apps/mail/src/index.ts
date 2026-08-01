@@ -238,7 +238,8 @@ app.post("/send", async (c) => {
     if (!template) return c.json({ error: "template-not-found" }, 404);
     try {
       html = renderTemplate(await getTemplateHtml(c.env, body.template, template.url), body.data ?? {});
-    } catch {
+    } catch (error) {
+      console.log("mail template fetch failed", String(error));
       return c.json({ error: "template-fetch-failed" }, 502);
     }
   }

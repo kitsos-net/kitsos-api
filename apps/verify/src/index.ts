@@ -446,6 +446,10 @@ resources.post("/", async (c) => {
   const result = await sendMagicLinkEmail(c.env, normalizedValue, confirmUrl, normalizedValue);
 
   if (!result.ok) {
+    // Keep the public response stable while retaining the sanitized upstream
+    // status/body produced by mail.ts for production diagnosis. This never
+    // includes the recipient address or magic-link token.
+    console.log("verification email delivery failed", result.error ?? "unknown mail error");
     await c.env.DB.batch([
       c.env.DB.prepare(
         "DELETE FROM resource_verifications WHERE id = ? AND verified_at IS NULL"

@@ -41,7 +41,10 @@ export async function getTemplateHtml(env: Env, templateId: string, url: string)
   if (cached) return cached;
 
   const res = await fetch(url, {
-    redirect: "error",
+    // Cloudflare Workers does not implement redirect: "error". Manual mode
+    // preserves the same security boundary because every 3xx response fails
+    // the res.ok check below instead of following the Location header.
+    redirect: "manual",
     signal: AbortSignal.timeout(TEMPLATE_FETCH_TIMEOUT_MS),
     headers: { accept: "text/html, text/plain;q=0.9" },
   });
