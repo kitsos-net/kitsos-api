@@ -146,6 +146,8 @@ sqlite3 "$global_db" \
   -cmd "PRAGMA foreign_keys = ON" \
   ".read packages/auth/0016_global_verified_resources.sql"
 
+sqlite3 "$global_db" ".read packages/auth/0017_verify_template_canonical_url.sql"
+
 sqlite3 "$global_db" "
   PRAGMA foreign_keys = ON;
   CREATE TEMP TABLE global_assertions (ok INTEGER NOT NULL CHECK (ok = 1));
@@ -169,6 +171,11 @@ sqlite3 "$global_db" "
   WHERE rv.user_id = 'global-owner'
     AND r.resource_type = 'email_address'
     AND r.value = 'global@example.com';
+  INSERT INTO global_assertions
+  SELECT COUNT(*) = 1
+  FROM mail_templates
+  WHERE id = 'resource-verification'
+    AND url = 'https://cdn.kitsos.net/api/mail/templates/verify-email-dev';
 "
 
 echo "global resource migration passed"

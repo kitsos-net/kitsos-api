@@ -57,7 +57,7 @@ VALUES (
   'resource-verification',
   'system:verify-mailer',
   'Resource verification',
-  'https://cdn.kitsos.net/api/mail/templates/verify-email-dev.html',
+  'https://cdn.kitsos.net/api/mail/templates/verify-email-dev',
   '["resource","confirm_url","magicLink"]'
 )
 ON CONFLICT(id) DO UPDATE SET
