@@ -74,11 +74,11 @@ function normalizeResourceValue(resourceType: string, method: string, value: str
     : null;
 }
 
-async function findOrCreateResource(env: Env, appId: string, resourceType: string, value: string) {
+async function findOrCreateResource(env: Env, resourceType: string, value: string) {
   const existing = await env.DB.prepare(
-    "SELECT id FROM resources WHERE app_id = ? AND resource_type = ? AND value = ?"
+    "SELECT id FROM resources WHERE resource_type = ? AND value = ?"
   )
-    .bind(appId, resourceType, value)
+    .bind(resourceType, value)
     .first<{ id: string }>();
   if (existing) return existing.id;
 
@@ -86,12 +86,14 @@ async function findOrCreateResource(env: Env, appId: string, resourceType: strin
   await env.DB.prepare(
     "INSERT OR IGNORE INTO resources (id, app_id, resource_type, value) VALUES (?, ?, ?, ?)"
   )
-    .bind(resourceId, appId, resourceType, value)
+    // app_id is retained as a storage compatibility column. Resources belong
+    // to Verify, not to the product that later consumes them.
+    .bind(resourceId, "verify", resourceType, value)
     .run();
   const resource = await env.DB.prepare(
-    "SELECT id FROM resources WHERE app_id = ? AND resource_type = ? AND value = ?"
+    "SELECT id FROM resources WHERE resource_type = ? AND value = ?"
   )
-    .bind(appId, resourceType, value)
+    .bind(resourceType, value)
     .first<{ id: string }>();
   if (!resource) throw new Error("resource creation failed");
   return resource.id;
@@ -101,8 +103,7 @@ async function grantAccess(
   env: Env,
   resourceId: string,
   userId: string,
-  verificationId: string,
-  scopes: string[]
+  verificationId: string
 ): Promise<boolean> {
   const resourceLimit = await getEffectiveLimit(env, userId, "verified_resources");
   const result = await env.DB.prepare(
@@ -122,7 +123,7 @@ async function grantAccess(
       id(),
       resourceId,
       userId,
-      JSON.stringify(scopes),
+      "[]",
       verificationId,
       resourceId,
       userId,
@@ -143,13 +144,12 @@ async function getResourceForDeletion(
   resourceId: string,
   userId?: string,
 ): Promise<{
-  app_id: string;
   resource_type: string;
   value: string;
   dependencies: ResourceDependencySummary;
 } | null> {
   const resource = await env.DB.prepare(
-    `SELECT r.app_id, r.resource_type, r.value
+    `SELECT r.resource_type, r.value
      FROM resources r
      WHERE r.id = ?
        ${userId ? `AND (
@@ -164,7 +164,7 @@ async function getResourceForDeletion(
        )` : ""}`
   )
     .bind(resourceId, ...(userId ? [userId, userId] : []))
-    .first<{ app_id: string; resource_type: string; value: string }>();
+    .first<{ resource_type: string; value: string }>();
   if (!resource) return null;
 
   const dependencyOwnerClause = userId ? "AND user_id = ?" : "";
@@ -172,11 +172,10 @@ async function getResourceForDeletion(
     env.DB.prepare(
       `SELECT COUNT(*) AS count
        FROM mail_webhooks
-       WHERE ? = 'mail' AND ? = 'email_address'
+       WHERE ? = 'email_address'
          AND lower(from_address) = lower(?)
          ${dependencyOwnerClause}`
     ).bind(
-      resource.app_id,
       resource.resource_type,
       resource.value,
       ...(userId ? [userId] : []),
@@ -184,11 +183,10 @@ async function getResourceForDeletion(
     env.DB.prepare(
       `SELECT COUNT(*) AS count
        FROM hme_aliases
-       WHERE ? = 'hide-my-email' AND ? = 'email_address'
+       WHERE ? = 'email_address'
          AND lower(forward_to) = lower(?)
          ${dependencyOwnerClause}`
     ).bind(
-      resource.app_id,
       resource.resource_type,
       resource.value,
       ...(userId ? [userId] : []),
@@ -264,7 +262,7 @@ resources.get("/", async (c) => {
   const page = pagination(c.req.query("limit"), c.req.query("offset"));
   if (!page) return c.json({ error: "invalid-pagination" }, 400);
   const r = await c.env.DB.prepare(
-    `SELECT r.id, r.app_id, r.resource_type, r.value,
+    `SELECT r.id, r.resource_type, r.value,
             rv.method, rv.verified_at, rv.reverify_due_at, rv.grace_expires_at
      FROM resources r
      JOIN resource_verifications rv ON rv.id = (
@@ -312,18 +310,14 @@ const VALID_METHODS = ["dns_txt", "magic_link"];
 resources.post("/", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json<{
-    appId?: string;
     resourceType?: string;
     value?: string;
     method?: string;
-    scopes?: string[];
   }>().catch(() => null);
 
   if (!body) return c.json({ error: "invalid-json-body" }, 400);
   if (
-    typeof body.appId !== "string"
-    || body.appId.length > 63
-    || typeof body.resourceType !== "string"
+    typeof body.resourceType !== "string"
     || body.resourceType.length > 64
     || typeof body.value !== "string"
     || typeof body.method !== "string"
@@ -332,7 +326,7 @@ resources.post("/", async (c) => {
     return c.json({ error: "invalid-field-types" }, 400);
   }
 
-  const missing = ["appId", "resourceType", "value", "method"].filter(
+  const missing = ["resourceType", "value", "method"].filter(
     (k) => !body[k as keyof typeof body]
   );
   if (missing.length > 0) {
@@ -341,15 +335,6 @@ resources.post("/", async (c) => {
   if (!VALID_METHODS.includes(body.method!)) {
     return c.json({ error: "invalid-method", allowed: VALID_METHODS }, 400);
   }
-  if (!Array.isArray(body.scopes) || body.scopes.length === 0 || body.scopes.length > 100) {
-    return c.json({ error: "missing-scopes" }, 400);
-  }
-  if (!body.scopes.every((scope) =>
-    typeof scope === "string" && scope.length > 0 && scope.length <= 100
-  )) {
-    return c.json({ error: "invalid-scopes" }, 400);
-  }
-
   const normalizedValue = normalizeResourceValue(body.resourceType!, body.method!, body.value!);
   if (!normalizedValue) {
     return c.json({
@@ -359,30 +344,15 @@ resources.post("/", async (c) => {
     }, 400);
   }
 
-  const appExists = await c.env.DB.prepare("SELECT 1 FROM apps WHERE id = ?")
-    .bind(body.appId)
-    .first();
-  if (!appExists) {
-    return c.json({ error: "app-not-found", appId: body.appId, hint: "Create the app first via keys-api /admin/apps" }, 404);
-  }
-  const scopeRows = await c.env.DB.prepare("SELECT scope FROM app_scopes WHERE app_id = ?")
-    .bind(body.appId)
-    .all<{ scope: string }>();
-  const allowedScopes = new Set(scopeRows.results.map((row) => row.scope));
-  const unknownScopes = body.scopes.filter((scope) => !allowedScopes.has(scope));
-  if (unknownScopes.length > 0) {
-    return c.json({ error: "invalid-scopes", scopes: unknownScopes }, 400);
-  }
-
   const existingGrant = await c.env.DB.prepare(
     `SELECT 1
      FROM resources r
      JOIN resource_grants rg ON rg.resource_id = r.id
-     WHERE r.app_id = ? AND r.resource_type = ? AND r.value = ?
+     WHERE r.resource_type = ? AND r.value = ?
        AND rg.user_id = ?
      LIMIT 1`
   )
-    .bind(body.appId, body.resourceType, normalizedValue, userId)
+    .bind(body.resourceType, normalizedValue, userId)
     .first();
   if (!existingGrant) {
     const resourceLimit = await getEffectiveLimit(c.env, userId, "verified_resources");
@@ -440,7 +410,7 @@ resources.post("/", async (c) => {
   verificationId = id();
 
   try {
-    resourceId = await findOrCreateResource(c.env, body.appId!, body.resourceType!, normalizedValue);
+    resourceId = await findOrCreateResource(c.env, body.resourceType!, normalizedValue);
     await c.env.DB.prepare(
       `INSERT INTO resource_verifications
          (id, resource_id, user_id, method, token_hash, token_expires_at, pending_scopes)
@@ -453,7 +423,7 @@ resources.post("/", async (c) => {
         method,
         tokenHash,
         tokenExpiresAt,
-        JSON.stringify([...new Set(body.scopes)])
+        "[]"
       )
       .run();
   } catch {
@@ -505,7 +475,7 @@ resources.post("/:resourceId/check-dns", async (c) => {
   const resourceId = c.req.param("resourceId");
 
   const verification = await c.env.DB.prepare(
-    `SELECT rv.id, rv.token_hash, rv.pending_scopes, r.value
+    `SELECT rv.id, rv.token_hash, r.value
      FROM resource_verifications rv
      JOIN resources r ON r.id = rv.resource_id
      WHERE rv.resource_id = ? AND rv.user_id = ? AND rv.method = 'dns_txt' AND rv.verified_at IS NULL
@@ -513,7 +483,7 @@ resources.post("/:resourceId/check-dns", async (c) => {
      ORDER BY rv.created_at DESC LIMIT 1`
   )
     .bind(resourceId, userId)
-    .first<{ id: string; token_hash: string; pending_scopes: string; value: string }>();
+    .first<{ id: string; token_hash: string; value: string }>();
 
   if (!verification) return c.json({ error: "no-pending-verification" }, 404);
 
@@ -536,8 +506,7 @@ resources.post("/:resourceId/check-dns", async (c) => {
     c.env,
     resourceId,
     userId,
-    verification.id,
-    JSON.parse(verification.pending_scopes)
+    verification.id
   );
   if (!granted) {
     await c.env.DB.prepare(
@@ -562,12 +531,12 @@ resources.get("/:resourceId/confirm", async (c) => {
   const tokenHash = await sha256Hex(token);
 
   const verification = await c.env.DB.prepare(
-    `SELECT id, user_id, pending_scopes FROM resource_verifications
+    `SELECT id, user_id FROM resource_verifications
      WHERE resource_id = ? AND token_hash = ? AND method = 'magic_link'
        AND verified_at IS NULL AND token_expires_at >= unixepoch()`
   )
     .bind(resourceId, tokenHash)
-    .first<{ id: string; user_id: string; pending_scopes: string }>();
+    .first<{ id: string; user_id: string }>();
 
   if (!verification) return c.json({ error: "invalid-or-expired-token" }, 404);
 
@@ -588,8 +557,7 @@ resources.get("/:resourceId/confirm", async (c) => {
     c.env,
     resourceId,
     verification.user_id,
-    verification.id,
-    JSON.parse(verification.pending_scopes)
+    verification.id
   );
   if (!granted) {
     await c.env.DB.prepare(
@@ -615,7 +583,7 @@ admin.get("/resources", async (c) => {
   const page = pagination(c.req.query("limit"), c.req.query("offset"));
   if (!page) return c.json({ error: "invalid-pagination" }, 400);
   const r = await c.env.DB.prepare(
-    `SELECT r.id, r.app_id, r.resource_type, r.value,
+    `SELECT r.id, r.resource_type, r.value,
             rv.user_id, rv.method, rv.verified_at, rv.reverify_due_at, rv.grace_expires_at
      FROM resources r
      LEFT JOIN resource_verifications rv ON rv.resource_id = r.id

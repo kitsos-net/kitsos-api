@@ -83,7 +83,7 @@ app.post("/aliases", async (c) => {
   }
   const forwardTo = body.forwardTo.trim().toLowerCase();
 
-  const grant = await checkResourceGrant(c.env, ctx, "email_address", forwardTo, "hme:receive");
+  const grant = await checkResourceGrant(c.env, ctx, "email_address", forwardTo);
   if (!grant.allowed) return c.json({ error: grant.reason }, 403);
 
   const withinHardCreationLimit = await consumeHardDailyLimit(
@@ -158,8 +158,7 @@ app.patch("/aliases/:aliasId", async (c) => {
       c.env,
       ctx,
       "email_address",
-      body.forwardTo.trim().toLowerCase(),
-      "hme:receive"
+      body.forwardTo.trim().toLowerCase()
     );
     if (!grant.allowed) return c.json({ error: grant.reason }, 403);
   }
@@ -230,8 +229,7 @@ async function email(message: ForwardableEmailMessage, env: Env, _ctx: Execution
       groupIds: [],
     },
     "email_address",
-    row.forward_to,
-    "hme:receive"
+    row.forward_to
   );
   if (!grant.allowed) {
     message.setReject("Alias destination is no longer verified");

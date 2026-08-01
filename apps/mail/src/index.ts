@@ -131,8 +131,7 @@ app.post("/webhook/:webhookId", async (c) => {
       groupIds: [],
     },
     "email_address",
-    webhook.from_address,
-    "mail:send"
+    webhook.from_address
   );
   if (!grant.allowed) return c.json({ error: "webhook-disabled" }, 403);
 
@@ -227,8 +226,7 @@ app.post("/send", async (c) => {
     c.env,
     ctx,
     "email_address",
-    normalizeEmail(body.from),
-    "mail:send"
+    normalizeEmail(body.from)
   );
   if (!grant.allowed) return c.json({ error: grant.reason }, 403);
 
@@ -427,7 +425,7 @@ app.post("/webhooks", async (c) => {
 
   const fromAddress = normalizeEmail(body.fromAddress);
   const toAddresses = body.toAddresses.map(normalizeEmail);
-  const grant = await checkResourceGrant(c.env, ctx, "email_address", fromAddress, "mail:send");
+  const grant = await checkResourceGrant(c.env, ctx, "email_address", fromAddress);
   if (!grant.allowed) return c.json({ error: grant.reason }, 403);
 
   const webhookId = id();
@@ -511,8 +509,7 @@ app.patch("/webhooks/:webhookId", async (c) => {
       c.env,
       auth.context!,
       "email_address",
-      normalizeEmail(body.fromAddress),
-      "mail:send"
+      normalizeEmail(body.fromAddress)
     );
     if (!grant.allowed) return c.json({ error: grant.reason }, 403);
   }

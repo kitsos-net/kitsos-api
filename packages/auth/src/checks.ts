@@ -320,48 +320,37 @@ export function checkScope(context: AuthContext, requiredScope: string): CheckRe
 }
 
 /**
- * Checks whether the authenticated user has a grant on the given
- * resource with the required scope, and that the underlying
- * verification hasn't expired past its grace period.
+ * Checks whether the authenticated user owns the given globally verified
+ * resource and that the verification hasn't expired past its grace period.
+ * Product authorization remains app-specific and is enforced by authenticate().
  */
 export async function checkResourceGrant(
   env: Env,
   context: AuthContext,
   resourceType: string,
-  value: string,
-  scope: string
+  value: string
 ): Promise<CheckResult> {
-  const resource = await env.DB.prepare(
-    `SELECT id FROM resources WHERE app_id = ? AND resource_type = ? AND value = ?`
-  )
-    .bind(context.appId, resourceType, value)
-    .first<{ id: string }>();
-
-  if (!resource) return { allowed: false, status: 403, reason: "resource-not-found" };
-
   const grant = await env.DB.prepare(
-    `SELECT rg.scopes, rv.grace_expires_at
-     FROM resource_grants rg
+    `SELECT rv.grace_expires_at
+     FROM resources r
+     JOIN resource_grants rg ON rg.resource_id = r.id
      JOIN resource_verifications rv ON rv.id = rg.verification_id
-     WHERE rg.resource_id = ? AND rg.user_id = ?
+     WHERE r.resource_type = ? AND r.value = ?
+       AND rg.user_id = ?
        AND rv.resource_id = rg.resource_id
        AND rv.user_id = rg.user_id
        AND rv.verified_at IS NOT NULL
+     ORDER BY rv.grace_expires_at IS NULL DESC, rv.grace_expires_at DESC
      LIMIT 1`
   )
-    .bind(resource.id, context.userId)
-    .first<{ scopes: string; grace_expires_at: number | null }>();
+    .bind(resourceType, value, context.userId)
+    .first<{ grace_expires_at: number | null }>();
 
   if (!grant) return { allowed: false, status: 403, reason: "resource-not-granted" };
 
   const now = Date.now() / 1000;
   if (grant.grace_expires_at && grant.grace_expires_at < now) {
     return { allowed: false, status: 403, reason: "resource-verification-expired" };
-  }
-
-  const scopes: string[] = JSON.parse(grant.scopes);
-  if (!scopes.includes(scope)) {
-    return { allowed: false, status: 403, reason: "resource-scope-missing" };
   }
 
   return { allowed: true, status: 200 };

@@ -115,3 +115,59 @@ sqlite3 "$test_db" "
 "
 
 echo "security invariants passed"
+
+global_db="$(mktemp /tmp/kitsos-global-resources.XXXXXX)"
+trap 'rm -f "$test_db" "$global_db"' EXIT
+
+for migration in packages/auth/000[1-9]_*.sql packages/auth/001[0-5]_*.sql; do
+  sqlite3 "$global_db" ".read $migration"
+done
+
+sqlite3 "$global_db" "
+  PRAGMA foreign_keys = ON;
+  INSERT INTO users (id, email) VALUES ('global-owner', 'global@example.com');
+  INSERT INTO resources (id, app_id, resource_type, value) VALUES
+    ('mail-copy', 'mail', 'email_address', 'global@example.com'),
+    ('hme-copy', 'hide-my-email', 'email_address', 'global@example.com');
+  INSERT INTO resource_verifications
+    (id, resource_id, user_id, method, verified_at)
+  VALUES
+    ('mail-verification', 'mail-copy', 'global-owner', 'magic_link', 100),
+    ('hme-verification', 'hme-copy', 'global-owner', 'magic_link', 200);
+  INSERT INTO resource_grants
+    (id, resource_id, user_id, scopes, verification_id)
+  VALUES
+    ('mail-grant', 'mail-copy', 'global-owner', '[\"mail:send\"]', 'mail-verification'),
+    ('hme-grant', 'hme-copy', 'global-owner', '[\"hme:receive\"]', 'hme-verification');
+"
+
+sqlite3 "$global_db" \
+  -cmd "PRAGMA foreign_keys = ON" \
+  ".read packages/auth/0016_global_verified_resources.sql"
+
+sqlite3 "$global_db" "
+  PRAGMA foreign_keys = ON;
+  CREATE TEMP TABLE global_assertions (ok INTEGER NOT NULL CHECK (ok = 1));
+  INSERT INTO global_assertions
+  SELECT COUNT(*) = 1
+  FROM resources
+  WHERE resource_type = 'email_address'
+    AND value = 'global@example.com'
+    AND app_id = 'verify';
+  INSERT INTO global_assertions
+  SELECT COUNT(*) = 1
+  FROM resource_grants rg
+  JOIN resources r ON r.id = rg.resource_id
+  WHERE rg.user_id = 'global-owner'
+    AND r.resource_type = 'email_address'
+    AND r.value = 'global@example.com';
+  INSERT INTO global_assertions
+  SELECT COUNT(*) = 2
+  FROM resource_verifications rv
+  JOIN resources r ON r.id = rv.resource_id
+  WHERE rv.user_id = 'global-owner'
+    AND r.resource_type = 'email_address'
+    AND r.value = 'global@example.com';
+"
+
+echo "global resource migration passed"
