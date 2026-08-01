@@ -97,6 +97,7 @@ WHERE id IN (
 
 DROP INDEX idx_resources_app_type_value;
 UPDATE resources SET app_id = 'verify';
+DROP INDEX IF EXISTS idx_resources_type_value;
 CREATE UNIQUE INDEX idx_resources_type_value
   ON resources(resource_type, value);
 

@@ -139,6 +139,7 @@ sqlite3 "$global_db" "
   VALUES
     ('mail-grant', 'mail-copy', 'global-owner', '[\"mail:send\"]', 'mail-verification'),
     ('hme-grant', 'hme-copy', 'global-owner', '[\"hme:receive\"]', 'hme-verification');
+  CREATE INDEX idx_resources_type_value ON resources(resource_type, value);
 "
 
 sqlite3 "$global_db" \
