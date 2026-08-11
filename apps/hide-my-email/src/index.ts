@@ -9,7 +9,7 @@ import {
   getEffectiveLimit,
   acceptPrivateMcpDelegation,
 } from "@kitsos/auth";
-import { withTelemetry } from "@kitsos/telemetry";
+import { recordError, recordEvent, withTelemetry } from "@kitsos/telemetry";
 import { generateAlias } from "./alias";
 import type { Env } from "./env";
 
@@ -131,8 +131,20 @@ app.post("/aliases", async (c) => {
       if (!String(error).toLowerCase().includes("unique")) throw error;
     }
   }
-  if (!alias) return c.json({ error: "alias-generation-failed" }, 500);
+  if (!alias) {
+    recordError(
+      "hme.alias.create",
+      "alias-generation-failed",
+      "Could not generate a unique alias",
+      { "kitsos.user.id": ctx.userId },
+    );
+    return c.json({ error: "alias-generation-failed" }, 500);
+  }
 
+  recordEvent("hme.alias.create", "success", {
+    "kitsos.alias.id": aliasId,
+    "kitsos.user.id": ctx.userId,
+  });
   return c.json({ id: aliasId, email: `${alias}@${DOMAIN}`, forwardTo }, 201);
 });
 
@@ -170,12 +182,22 @@ app.patch("/aliases/:aliasId", async (c) => {
   if (body.status) { updates.push("status = ?"); values.push(body.status); }
   if (body.label !== undefined) { updates.push("label = ?"); values.push(body.label); }
   if (body.forwardTo) { updates.push("forward_to = ?"); values.push(body.forwardTo.trim().toLowerCase()); }
-  if (updates.length === 0) return c.body(null, 204);
+  if (updates.length === 0) {
+    recordEvent("hme.alias.update", "noop", {
+      "kitsos.alias.id": aliasId,
+      "kitsos.user.id": ctx.userId,
+    });
+    return c.body(null, 204);
+  }
 
   values.push(aliasId, ctx.userId);
   await c.env.DB.prepare(`UPDATE hme_aliases SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`)
     .bind(...values)
     .run();
+  recordEvent("hme.alias.update", "success", {
+    "kitsos.alias.id": aliasId,
+    "kitsos.user.id": ctx.userId,
+  });
   return c.body(null, 204);
 });
 
@@ -185,6 +207,10 @@ app.delete("/aliases/:aliasId", async (c) => {
   await c.env.DB.prepare("DELETE FROM hme_aliases WHERE id = ? AND user_id = ?")
     .bind(c.req.param("aliasId"), auth.context!.userId)
     .run();
+  recordEvent("hme.alias.delete", "success", {
+    "kitsos.alias.id": c.req.param("aliasId"),
+    "kitsos.user.id": auth.context!.userId,
+  });
   return c.body(null, 204);
 });
 

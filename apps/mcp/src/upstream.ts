@@ -1,4 +1,5 @@
 import { mcpDelegationHeaders } from "@kitsos/auth";
+import { recordError, recordEvent } from "@kitsos/telemetry";
 import type { ToolContext } from "./env";
 
 export type UpstreamName = "MAIL" | "HIDE_MY_EMAIL" | "UTILITY" | "VERIFY" | "KEYS_API";
@@ -19,6 +20,7 @@ export interface UpstreamResult {
 
 export async function callUpstream(
   context: ToolContext,
+  toolName: string,
   call: UpstreamCall,
 ): Promise<UpstreamResult> {
   const url = new URL(call.path, `https://${call.service.toLowerCase()}.internal`);
@@ -36,8 +38,22 @@ export async function callUpstream(
     init.body = JSON.stringify(call.body);
   }
 
-  const response = await context.env[call.service].fetch(new Request(url, init));
+  let response: Response;
+  try {
+    response = await context.env[call.service].fetch(new Request(url, init));
+  } catch {
+    recordError("mcp.tool.call", "upstream-fetch-failed", "MCP upstream request failed", {
+      "kitsos.mcp.tool.name": toolName,
+      "kitsos.mcp.upstream.service": call.service.toLowerCase(),
+    });
+    throw new Error("MCP upstream request failed");
+  }
   if (response.status === 204) {
+    recordEvent("mcp.tool.call", "success", {
+      "kitsos.mcp.tool.name": toolName,
+      "kitsos.mcp.upstream.service": call.service.toLowerCase(),
+      "http.upstream.status_code": 204,
+    });
     return { ok: true, status: 204, data: { success: true } };
   }
   const text = await response.text();
@@ -49,6 +65,18 @@ export async function callUpstream(
       data = { error: "invalid-upstream-json" };
     }
   }
+  const errorCode = !response.ok
+    && typeof data === "object"
+    && data !== null
+    && typeof (data as { error?: unknown }).error === "string"
+    ? (data as { error: string }).error
+    : undefined;
+  recordEvent("mcp.tool.call", response.ok ? "success" : "error", {
+    "kitsos.mcp.tool.name": toolName,
+    "kitsos.mcp.upstream.service": call.service.toLowerCase(),
+    "http.upstream.status_code": response.status,
+    "error.code": errorCode,
+  });
   return { ok: response.ok, status: response.status, data };
 }
 

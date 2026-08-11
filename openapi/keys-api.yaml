@@ -118,7 +118,7 @@ components:
         appId: { type: string }
         limitType:
           type: string
-          enum: [emails_per_day, mail_templates, mail_webhooks, hme_aliases, verified_resources, verification_attempts_per_day, api_keys]
+          enum: [emails_per_day, mail_templates, mail_webhooks, hme_aliases, verified_resources, verification_attempts_per_day, api_keys, mcp_connections]
         limitValue: { type: integer, minimum: 1 }
         currentValue: { type: integer, minimum: 0 }
         remaining: { type: integer, minimum: 0 }

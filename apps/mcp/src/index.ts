@@ -1,6 +1,11 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
-import { annotateAuthenticatedRequest, checkRateLimit } from "@kitsos/auth";
+import {
+  annotateAuthenticatedRequest,
+  checkRateLimit,
+  recordAuthDecision,
+  recordRateLimitDecision,
+} from "@kitsos/auth";
 import { withTelemetry } from "@kitsos/telemetry";
 import { createMcpHandler } from "agents/mcp/server";
 import { authHandler } from "./auth-handler";
@@ -54,6 +59,13 @@ async function publicEndpointRateLimit(
     env,
     `mcp-public:${pathname}:${requestIp(request)}`,
     options,
+  );
+  recordRateLimitDecision(
+    "mcp",
+    `mcp-public:${pathname}`,
+    result.allowed ? "allowed" : "rate_limited",
+    result.retryAfterSeconds,
+    result.reason,
   );
   return result.allowed ? null : rateLimitResponse(result.retryAfterSeconds);
 }
@@ -163,36 +175,79 @@ export class McpApiHandler extends WorkerEntrypoint<Env, McpProps> {
   async fetch(request: Request): Promise<Response> {
     const props: unknown = this.ctx.props;
     if (!isMcpProps(props)) {
+      recordAuthDecision({
+        appId: "mcp",
+        requiredScope: "mcp:connect",
+        outcome: "denied",
+        reason: "invalid-oauth-token-properties",
+      });
       return Response.json({ error: "invalid-oauth-token-properties" }, { status: 401 });
     }
+    const connectionBucket = `mcp-server:connection:${props.delegationId}`;
     const connectionRate = await checkRateLimit(
       this.env,
-      `mcp-server:connection:${props.delegationId}`,
+      connectionBucket,
       { windowSeconds: 60, maxRequests: 60 },
     );
+    recordRateLimitDecision(
+      "mcp",
+      connectionBucket,
+      connectionRate.allowed ? "allowed" : "rate_limited",
+      connectionRate.retryAfterSeconds,
+      connectionRate.reason,
+    );
     if (!connectionRate.allowed) {
+      recordAuthDecision({
+        appId: "mcp",
+        requiredScope: "mcp:connect",
+        outcome: "denied",
+        reason: connectionRate.reason,
+      });
       return rateLimitResponse(connectionRate.retryAfterSeconds);
     }
+    const userBucket = `mcp-server:user:${props.userId}`;
     const userRate = await checkRateLimit(
       this.env,
-      `mcp-server:user:${props.userId}`,
+      userBucket,
       { windowSeconds: 60, maxRequests: 120 },
     );
-    if (!userRate.allowed) return rateLimitResponse(userRate.retryAfterSeconds);
+    recordRateLimitDecision(
+      "mcp",
+      userBucket,
+      userRate.allowed ? "allowed" : "rate_limited",
+      userRate.retryAfterSeconds,
+      userRate.reason,
+    );
+    if (!userRate.allowed) {
+      recordAuthDecision({
+        appId: "mcp",
+        requiredScope: "mcp:connect",
+        outcome: "denied",
+        reason: userRate.reason,
+      });
+      return rateLimitResponse(userRate.retryAfterSeconds);
+    }
     const scopes = await effectiveMcpScopes(
       this.env,
       props.userId,
       props.delegationId,
       props.scopes,
     );
-    annotateAuthenticatedRequest({
-      method: "mcp",
+    const authContext = {
+      method: "mcp" as const,
       userId: props.userId,
       appId: "mcp",
       credentialId: props.delegationId,
       clientId: props.clientId,
       scopes: [...scopes],
       groupIds: [],
+    };
+    annotateAuthenticatedRequest(authContext, "mcp", "mcp:connect");
+    recordAuthDecision({
+      appId: "mcp",
+      requiredScope: "mcp:connect",
+      outcome: "allowed",
+      context: authContext,
     });
     const context: ToolContext = {
       env: this.env,

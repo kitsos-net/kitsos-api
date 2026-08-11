@@ -13,10 +13,15 @@ import {
   sha256Hex,
   acceptPrivateMcpDelegation,
 } from "@kitsos/auth";
-import { withTelemetry } from "@kitsos/telemetry";
+import { recordError, recordEvent, withTelemetry } from "@kitsos/telemetry";
 import { resolvePayload } from "./dotpath";
 import { sendViaBrevo } from "./brevo";
-import { getTemplateHtml, invalidateTemplateCache, renderTemplate } from "./template";
+import {
+  getTemplateHtml,
+  invalidateTemplateCache,
+  renderTemplate,
+  TemplateFetchError,
+} from "./template";
 import {
   isEmail,
   isEmailList,
@@ -68,6 +73,25 @@ function id() {
   return crypto.randomUUID();
 }
 
+function recordTemplateFailure(
+  eventName: "mail.message.send" | "mail.webhook.deliver",
+  error: unknown,
+  fields: Record<string, string | number | undefined>,
+): void {
+  const failure = error instanceof TemplateFetchError ? error : null;
+  recordError(
+    eventName,
+    failure?.code ?? "template-fetch-failed",
+    "Mail template source could not be loaded",
+    {
+      ...fields,
+      ...(failure?.upstreamStatus !== undefined
+        ? { "http.upstream.status_code": failure.upstreamStatus }
+        : {}),
+    },
+  );
+}
+
 function pagination(limitValue?: string, offsetValue?: string) {
   const limit = Number(limitValue ?? 100);
   const offset = Number(offsetValue ?? 0);
@@ -102,8 +126,20 @@ function decodeJsonFields(
 app.post("/webhook/:webhookId", async (c) => {
   const webhookId = c.req.param("webhookId");
   const providedSecret = c.req.header("X-Webhook-Secret") ?? "";
-  if (!providedSecret) return c.json({ error: "missing-secret" }, 401);
-  if (providedSecret.length > 256) return c.json({ error: "invalid-secret" }, 401);
+  if (!providedSecret) {
+    recordEvent("mail.webhook.deliver", "denied", {
+      "error.code": "missing-secret",
+      "kitsos.webhook.id": webhookId,
+    });
+    return c.json({ error: "missing-secret" }, 401);
+  }
+  if (providedSecret.length > 256) {
+    recordEvent("mail.webhook.deliver", "denied", {
+      "error.code": "invalid-secret",
+      "kitsos.webhook.id": webhookId,
+    });
+    return c.json({ error: "invalid-secret" }, 401);
+  }
 
   const webhook = await c.env.DB.prepare("SELECT * FROM mail_webhooks WHERE id = ?")
     .bind(webhookId)
@@ -116,10 +152,21 @@ app.post("/webhook/:webhookId", async (c) => {
       mapping: string;
       secret_hash: string;
     }>();
-  if (!webhook) return c.json({ error: "not-found" }, 404);
+  if (!webhook) {
+    recordEvent("mail.webhook.deliver", "denied", {
+      "error.code": "not-found",
+      "kitsos.webhook.id": webhookId,
+    });
+    return c.json({ error: "not-found" }, 404);
+  }
 
   const providedHash = await sha256Hex(providedSecret);
   if (!constantTimeEqual(providedHash, webhook.secret_hash)) {
+    recordEvent("mail.webhook.deliver", "denied", {
+      "error.code": "invalid-secret",
+      "kitsos.webhook.id": webhookId,
+      "kitsos.user.id": webhook.user_id,
+    });
     return c.json({ error: "invalid-secret" }, 401);
   }
 
@@ -135,7 +182,14 @@ app.post("/webhook/:webhookId", async (c) => {
     "email_address",
     webhook.from_address
   );
-  if (!grant.allowed) return c.json({ error: "webhook-disabled" }, 403);
+  if (!grant.allowed) {
+    recordEvent("mail.webhook.deliver", "denied", {
+      "error.code": "webhook-disabled",
+      "kitsos.webhook.id": webhookId,
+      "kitsos.user.id": webhook.user_id,
+    });
+    return c.json({ error: "webhook-disabled" }, 403);
+  }
 
   const template = await c.env.DB.prepare("SELECT * FROM mail_templates WHERE id = ? AND user_id = ?")
     .bind(webhook.template_id, webhook.user_id)
@@ -163,7 +217,12 @@ app.post("/webhook/:webhookId", async (c) => {
   let html: string;
   try {
     html = renderTemplate(await getTemplateHtml(c.env, webhook.template_id, template.url), data);
-  } catch (e) {
+  } catch (error) {
+    recordTemplateFailure("mail.webhook.deliver", error, {
+      "kitsos.webhook.id": webhookId,
+      "kitsos.template.id": webhook.template_id,
+      "kitsos.user.id": webhook.user_id,
+    });
     return c.json({ error: "template-fetch-failed" }, 502);
   }
 
@@ -185,7 +244,24 @@ app.post("/webhook/:webhookId", async (c) => {
     html,
   });
 
-  if (!result.ok) return c.json({ error: "send-failed" }, 502);
+  if (!result.ok) {
+    recordError(
+      "mail.webhook.deliver",
+      "send-failed",
+      "Email provider rejected webhook delivery",
+      {
+        "kitsos.webhook.id": webhookId,
+        "kitsos.user.id": webhook.user_id,
+      },
+    );
+    return c.json({ error: "send-failed" }, 502);
+  }
+  recordEvent("mail.webhook.deliver", "success", {
+    "kitsos.webhook.id": webhookId,
+    "kitsos.template.id": webhook.template_id,
+    "kitsos.user.id": webhook.user_id,
+    "mail.recipient.count": toAddresses.length,
+  });
   return c.json({ sent: true });
 });
 
@@ -240,7 +316,11 @@ app.post("/send", async (c) => {
     if (!template) return c.json({ error: "template-not-found" }, 404);
     try {
       html = renderTemplate(await getTemplateHtml(c.env, body.template, template.url), body.data ?? {});
-    } catch {
+    } catch (error) {
+      recordTemplateFailure("mail.message.send", error, {
+        "kitsos.template.id": body.template,
+        "kitsos.user.id": ctx.userId,
+      });
       return c.json({ error: "template-fetch-failed" }, 502);
     }
   }
@@ -259,7 +339,18 @@ app.post("/send", async (c) => {
     html,
     text: body.text,
   });
-  if (!result.ok) return c.json({ error: "send-failed" }, 502);
+  if (!result.ok) {
+    recordError("mail.message.send", "send-failed", "Email provider rejected message delivery", {
+      "kitsos.user.id": ctx.userId,
+      "mail.recipient.count": body.to.length,
+    });
+    return c.json({ error: "send-failed" }, 502);
+  }
+  recordEvent("mail.message.send", "success", {
+    "kitsos.user.id": ctx.userId,
+    "mail.recipient.count": body.to.length,
+    ...(body.template ? { "kitsos.template.id": body.template } : {}),
+  });
   return c.json({ sent: true });
 });
 
@@ -326,6 +417,10 @@ app.post("/templates", async (c) => {
   if (created.meta.changes !== 1) {
     return c.json({ error: "template-limit-exceeded", limit: templateLimit }, 429);
   }
+  recordEvent("mail.template.create", "success", {
+    "kitsos.template.id": templateId,
+    "kitsos.user.id": auth.context!.userId,
+  });
   return c.json({ id: templateId }, 201);
 });
 
@@ -358,6 +453,10 @@ app.patch("/templates/:templateId", async (c) => {
       .bind(JSON.stringify([...new Set(body.variables)]), templateId, auth.context!.userId)
       .run();
   }
+  recordEvent("mail.template.update", "success", {
+    "kitsos.template.id": templateId,
+    "kitsos.user.id": auth.context!.userId,
+  });
   return c.body(null, 204);
 });
 
@@ -374,6 +473,10 @@ app.delete("/templates/:templateId", async (c) => {
     .bind(c.req.param("templateId"), auth.context!.userId)
     .run();
   await invalidateTemplateCache(c.env, c.req.param("templateId"));
+  recordEvent("mail.template.delete", "success", {
+    "kitsos.template.id": c.req.param("templateId"),
+    "kitsos.user.id": auth.context!.userId,
+  });
   return c.body(null, 204);
 });
 
@@ -470,6 +573,11 @@ app.post("/webhooks", async (c) => {
     return c.json({ error: "webhook-limit-exceeded", limit: webhookLimit }, 429);
   }
 
+  recordEvent("mail.webhook.create", "success", {
+    "kitsos.webhook.id": webhookId,
+    "kitsos.template.id": body.templateId,
+    "kitsos.user.id": ctx.userId,
+  });
   // secret shown only here — not recoverable afterwards
   return c.json({ id: webhookId, secret, url: `https://mail.api.kitsos.net/v1/webhook/${webhookId}` }, 201);
 });
@@ -528,12 +636,22 @@ app.patch("/webhooks/:webhookId", async (c) => {
   if (body.fromAddress) { updates.push("from_address = ?"); values.push(normalizeEmail(body.fromAddress)); }
   if (body.toAddresses) { updates.push("to_addresses = ?"); values.push(JSON.stringify(body.toAddresses.map(normalizeEmail))); }
   if (body.mapping) { updates.push("mapping = ?"); values.push(JSON.stringify(body.mapping)); }
-  if (updates.length === 0) return c.body(null, 204);
+  if (updates.length === 0) {
+    recordEvent("mail.webhook.update", "noop", {
+      "kitsos.webhook.id": webhookId,
+      "kitsos.user.id": auth.context!.userId,
+    });
+    return c.body(null, 204);
+  }
 
   values.push(webhookId, auth.context!.userId);
   await c.env.DB.prepare(`UPDATE mail_webhooks SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`)
     .bind(...values)
     .run();
+  recordEvent("mail.webhook.update", "success", {
+    "kitsos.webhook.id": webhookId,
+    "kitsos.user.id": auth.context!.userId,
+  });
   return c.body(null, 204);
 });
 
@@ -543,6 +661,10 @@ app.delete("/webhooks/:webhookId", async (c) => {
   await c.env.DB.prepare("DELETE FROM mail_webhooks WHERE id = ? AND user_id = ?")
     .bind(c.req.param("webhookId"), auth.context!.userId)
     .run();
+  recordEvent("mail.webhook.delete", "success", {
+    "kitsos.webhook.id": c.req.param("webhookId"),
+    "kitsos.user.id": auth.context!.userId,
+  });
   return c.body(null, 204);
 });
 

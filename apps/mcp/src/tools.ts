@@ -55,7 +55,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         inputSchema: z.object({}),
         annotations: readOnly,
       },
-      async () => toolResponse(await callUpstream(context, {
+      async () => toolResponse(await callUpstream(context, "kitsos_account_get", {
         service: "KEYS_API",
         path: "/v1/me",
       })),
@@ -68,7 +68,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         inputSchema: z.object({}),
         annotations: readOnly,
       },
-      async () => toolResponse(await callUpstream(context, {
+      async () => toolResponse(await callUpstream(context, "kitsos_account_limits_list", {
         service: "KEYS_API",
         path: "/v1/me/limits",
       })),
@@ -81,7 +81,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         inputSchema: z.object(pagination),
         annotations: readOnly,
       },
-      async (args) => toolResponse(await callUpstream(context, {
+      async (args) => toolResponse(await callUpstream(context, "kitsos_account_limit_requests_list", {
         service: "KEYS_API",
         path: "/v1/me/limit-increase-requests",
         query: args,
@@ -111,7 +111,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         }),
         annotations: create,
       },
-      async (args) => toolResponse(await callUpstream(context, {
+      async (args) => toolResponse(await callUpstream(context, "kitsos_account_limit_request_create", {
         service: "KEYS_API",
         method: "POST",
         path: "/v1/me/limit-increase-requests",
@@ -129,7 +129,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         inputSchema: z.object(pagination),
         annotations: readOnly,
       },
-      async (args) => toolResponse(await callUpstream(context, {
+      async (args) => toolResponse(await callUpstream(context, "kitsos_verify_resources_list", {
         service: "VERIFY",
         path: "/v1/resources",
         query: args,
@@ -144,15 +144,13 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         title: "Ressource verifizieren",
         description: "Registriert eine Ressource und startet eine DNS-TXT- oder Magic-Link-Verifizierung.",
         inputSchema: z.object({
-          appId: z.string().min(1).max(63),
           resourceType: z.string().min(1).max(64),
           value: z.string().min(1).max(320),
           method: z.enum(["dns_txt", "magic_link"]),
-          scopes: z.array(z.string().min(1).max(100)).min(1).max(100),
         }),
         annotations: create,
       },
-      async (args) => toolResponse(await callUpstream(context, {
+      async (args) => toolResponse(await callUpstream(context, "kitsos_verify_resource_start", {
         service: "VERIFY",
         method: "POST",
         path: "/v1/resources",
@@ -167,7 +165,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         inputSchema: z.object({ resourceId: id }),
         annotations: update,
       },
-      async ({ resourceId }) => toolResponse(await callUpstream(context, {
+      async ({ resourceId }) => toolResponse(await callUpstream(context, "kitsos_verify_dns_check", {
         service: "VERIFY",
         method: "POST",
         path: `/v1/resources/${encodeURIComponent(resourceId)}/check-dns`,
@@ -184,7 +182,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         inputSchema: z.object(pagination),
         annotations: readOnly,
       },
-      async (args) => toolResponse(await callUpstream(context, {
+      async (args) => toolResponse(await callUpstream(context, "kitsos_mail_templates_list", {
         service: "MAIL",
         path: "/v1/templates",
         query: args,
@@ -198,7 +196,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         inputSchema: z.object(pagination),
         annotations: readOnly,
       },
-      async (args) => toolResponse(await callUpstream(context, {
+      async (args) => toolResponse(await callUpstream(context, "kitsos_mail_webhooks_list", {
         service: "MAIL",
         path: "/v1/webhooks",
         query: args,
@@ -226,7 +224,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
           openWorldHint: true,
         },
       },
-      async (args) => toolResponse(await callUpstream(context, {
+      async (args) => toolResponse(await callUpstream(context, "kitsos_mail_send", {
         service: "MAIL",
         method: "POST",
         path: "/v1/send",
@@ -248,7 +246,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         }),
         annotations: create,
       },
-      async (args) => toolResponse(await callUpstream(context, {
+      async (args) => toolResponse(await callUpstream(context, "kitsos_mail_template_create", {
         service: "MAIL",
         method: "POST",
         path: "/v1/templates",
@@ -267,7 +265,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         }),
         annotations: update,
       },
-      async ({ templateId, ...body }) => toolResponse(await callUpstream(context, {
+      async ({ templateId, ...body }) => toolResponse(await callUpstream(context, "kitsos_mail_template_update", {
         service: "MAIL",
         method: "PATCH",
         path: `/v1/templates/${encodeURIComponent(templateId)}`,
@@ -282,7 +280,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         inputSchema: z.object({ templateId: id }),
         annotations: remove,
       },
-      async ({ templateId }) => toolResponse(await callUpstream(context, {
+      async ({ templateId }) => toolResponse(await callUpstream(context, "kitsos_mail_template_delete", {
         service: "MAIL",
         method: "DELETE",
         path: `/v1/templates/${encodeURIComponent(templateId)}`,
@@ -302,7 +300,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         }),
         annotations: create,
       },
-      async (args) => toolResponse(await callUpstream(context, {
+      async (args) => toolResponse(await callUpstream(context, "kitsos_mail_webhook_create", {
         service: "MAIL",
         method: "POST",
         path: "/v1/webhooks",
@@ -323,7 +321,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         }),
         annotations: update,
       },
-      async ({ webhookId, ...body }) => toolResponse(await callUpstream(context, {
+      async ({ webhookId, ...body }) => toolResponse(await callUpstream(context, "kitsos_mail_webhook_update", {
         service: "MAIL",
         method: "PATCH",
         path: `/v1/webhooks/${encodeURIComponent(webhookId)}`,
@@ -338,7 +336,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         inputSchema: z.object({ webhookId: id }),
         annotations: remove,
       },
-      async ({ webhookId }) => toolResponse(await callUpstream(context, {
+      async ({ webhookId }) => toolResponse(await callUpstream(context, "kitsos_mail_webhook_delete", {
         service: "MAIL",
         method: "DELETE",
         path: `/v1/webhooks/${encodeURIComponent(webhookId)}`,
@@ -355,7 +353,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         inputSchema: z.object(pagination),
         annotations: readOnly,
       },
-      async (args) => toolResponse(await callUpstream(context, {
+      async (args) => toolResponse(await callUpstream(context, "kitsos_hme_aliases_list", {
         service: "HIDE_MY_EMAIL",
         path: "/v1/aliases",
         query: args,
@@ -375,7 +373,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         }),
         annotations: create,
       },
-      async (args) => toolResponse(await callUpstream(context, {
+      async (args) => toolResponse(await callUpstream(context, "kitsos_hme_alias_create", {
         service: "HIDE_MY_EMAIL",
         method: "POST",
         path: "/v1/aliases",
@@ -395,7 +393,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         }),
         annotations: update,
       },
-      async ({ aliasId, ...body }) => toolResponse(await callUpstream(context, {
+      async ({ aliasId, ...body }) => toolResponse(await callUpstream(context, "kitsos_hme_alias_update", {
         service: "HIDE_MY_EMAIL",
         method: "PATCH",
         path: `/v1/aliases/${encodeURIComponent(aliasId)}`,
@@ -410,7 +408,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         inputSchema: z.object({ aliasId: id }),
         annotations: remove,
       },
-      async ({ aliasId }) => toolResponse(await callUpstream(context, {
+      async ({ aliasId }) => toolResponse(await callUpstream(context, "kitsos_hme_alias_delete", {
         service: "HIDE_MY_EMAIL",
         method: "DELETE",
         path: `/v1/aliases/${encodeURIComponent(aliasId)}`,
@@ -431,7 +429,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         }),
         annotations: readOnly,
       },
-      async ({ length, symbols, strong }) => toolResponse(await callUpstream(context, {
+      async ({ length, symbols, strong }) => toolResponse(await callUpstream(context, "kitsos_utility_password_generate", {
         service: "UTILITY",
         path: "/v1/crypt/pass",
         query: { len: length, symbols: symbols || undefined, strong: strong || undefined },
@@ -448,7 +446,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         }),
         annotations: readOnly,
       },
-      async ({ bytes, encoding }) => toolResponse(await callUpstream(context, {
+      async ({ bytes, encoding }) => toolResponse(await callUpstream(context, "kitsos_utility_token_generate", {
         service: "UTILITY",
         path: "/v1/crypt/token",
         query: { len: bytes, enc: encoding },
@@ -465,7 +463,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         }),
         annotations: readOnly,
       },
-      async (args) => toolResponse(await callUpstream(context, {
+      async (args) => toolResponse(await callUpstream(context, "kitsos_utility_number_generate", {
         service: "UTILITY",
         path: "/v1/crypt/num",
         query: args,
@@ -482,7 +480,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         }),
         annotations: readOnly,
       },
-      async ({ text, algorithm }) => toolResponse(await callUpstream(context, {
+      async ({ text, algorithm }) => toolResponse(await callUpstream(context, "kitsos_utility_hash", {
         service: "UTILITY",
         path: "/v1/crypt/hash",
         query: { text, algo: algorithm },
@@ -502,7 +500,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         }),
         annotations: readOnly,
       },
-      async ({ timezone, format }) => toolResponse(await callUpstream(context, {
+      async ({ timezone, format }) => toolResponse(await callUpstream(context, "kitsos_utility_time_get", {
         service: "UTILITY",
         path: "/v1/time",
         query: { tz: timezone, format },
@@ -516,7 +514,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         inputSchema: z.object({}),
         annotations: readOnly,
       },
-      async () => toolResponse(await callUpstream(context, {
+      async () => toolResponse(await callUpstream(context, "kitsos_utility_timezones_list", {
         service: "UTILITY",
         path: "/v1/time/zones",
       })),
@@ -532,7 +530,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
         inputSchema: z.object({}),
         annotations: readOnly,
       },
-      async () => toolResponse(await callUpstream(context, {
+      async () => toolResponse(await callUpstream(context, "kitsos_utility_geo_get", {
         service: "UTILITY",
         path: "/v1/geo",
       })),
@@ -556,7 +554,7 @@ export function createKitsosMcpServer(context: ToolContext): McpServer {
           openWorldHint: true,
         },
       },
-      async ({ name, type, provider, cache }) => toolResponse(await callUpstream(context, {
+      async ({ name, type, provider, cache }) => toolResponse(await callUpstream(context, "kitsos_utility_dns_lookup", {
         service: "UTILITY",
         path: provider === "default" ? "/v1/dns" : `/v1/dns/${provider}`,
         query: { name, type, cache },

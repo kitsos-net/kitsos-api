@@ -13,12 +13,17 @@ type DecisionFields = {
 export function recordAuthDecision(fields: DecisionFields): void {
   const span = trace.getActiveSpan();
   if (!span) return;
+  const eventOutcome = fields.reason === "rate-limit-exceeded"
+    ? "rate_limited"
+    : fields.reason?.endsWith("storage-unavailable")
+      ? "error"
+      : fields.outcome;
   const attributes = {
-    "event.name": "auth.decision",
-    "event.outcome": fields.outcome,
-    "kitsos.app.id": fields.appId,
+    "event.category": "authentication",
+    "event.outcome": eventOutcome,
+    ...(fields.reason ? { "event.reason": fields.reason } : {}),
+    "kitsos.api.name": fields.appId,
     "kitsos.request.scope": fields.requiredScope,
-    ...(fields.reason ? { "error.code": fields.reason } : {}),
     ...(fields.context ? {
       "kitsos.user.id": fields.context.userId,
       "kitsos.auth.method": fields.context.method,
@@ -27,7 +32,6 @@ export function recordAuthDecision(fields: DecisionFields): void {
     ...(fields.keyFingerprint ? { "kitsos.api_key.fingerprint": fields.keyFingerprint } : {}),
   };
   span.addEvent("auth.decision", attributes);
-  span.setAttributes(attributes);
 }
 
 export function recordResourceDecision(
@@ -40,45 +44,67 @@ export function recordResourceDecision(
   const span = trace.getActiveSpan();
   if (!span) return;
   const attributes = {
-    "event.name": "resource.authorization",
+    "event.category": "authorization",
     "event.outcome": outcome,
+    ...(reason ? { "event.reason": reason } : {}),
     "kitsos.user.id": context.userId,
-    "kitsos.app.id": context.appId,
+    "kitsos.api.name": context.appId,
     "kitsos.resource.type": resourceType,
     ...(resourceId ? { "kitsos.resource.id": resourceId } : {}),
     ...(context.apiKeyId ? { "kitsos.api_key.id": context.apiKeyId } : {}),
-    ...(reason ? { "error.code": reason } : {}),
   };
   span.addEvent("resource.authorization", attributes);
-  span.setAttributes(attributes);
 }
 
 export function recordUsageDecision(
   userId: string,
   appId: string,
   limitType: string,
-  outcome: "allowed" | "denied",
-  current: number,
+  outcome: "allowed" | "denied" | "error" | "noop",
+  current: number | undefined,
   cost: number,
-  limit: number,
+  limit: number | undefined,
   reason?: string
 ): void {
   const span = trace.getActiveSpan();
   if (!span) return;
+  const eventOutcome = reason === "usage-limit-exceeded" && outcome === "denied"
+    ? "rate_limited"
+    : outcome;
   const attributes = {
-    "event.name": "usage.decision",
-    "event.outcome": outcome,
+    "event.category": "usage",
+    "event.outcome": eventOutcome,
+    ...(reason ? { "event.reason": reason } : {}),
     "kitsos.user.id": userId,
-    "kitsos.app.id": appId,
+    "kitsos.api.name": appId,
     "limit.type": limitType,
-    "limit.value": limit,
-    "usage.current": current,
+    ...(limit !== undefined ? { "limit.value": limit } : {}),
+    ...(current !== undefined ? { "usage.current": current } : {}),
     "usage.cost": cost,
-    "usage.next": current + cost,
-    ...(reason ? { "error.code": reason } : {}),
+    ...(current !== undefined ? { "usage.next": current + cost } : {}),
   };
   span.addEvent("usage.decision", attributes);
-  span.setAttributes(attributes);
+}
+
+export function recordRateLimitDecision(
+  appId: string,
+  bucket: string,
+  outcome: "allowed" | "rate_limited" | "error",
+  retryAfterSeconds?: number,
+  failureReason?: string,
+): void {
+  const span = trace.getActiveSpan();
+  if (!span) return;
+  const reason = failureReason
+    ?? (outcome === "rate_limited" ? "rate-limit-exceeded" : undefined);
+  span.addEvent("rate_limit.decision", {
+    "event.category": "rate_limit",
+    "event.outcome": outcome,
+    ...(reason ? { "event.reason": reason } : {}),
+    "kitsos.api.name": appId,
+    "limit.bucket": bucket,
+    ...(retryAfterSeconds ? { "limit.retry_after_seconds": retryAfterSeconds } : {}),
+  });
 }
 
 /**
@@ -98,9 +124,11 @@ export function annotateAuthenticatedRequest(
 
   span.setAttributes({
     "kitsos.user.id": context.userId,
-    "kitsos.app.id": appId ?? context.appId,
     "kitsos.auth.method": context.method,
+    "kitsos.api_key.used": context.method === "api_key",
     ...(context.apiKeyId ? { "kitsos.api_key.id": context.apiKeyId } : {}),
+    ...(context.credentialId ? { "kitsos.credential.id": context.credentialId } : {}),
+    ...(context.clientId ? { "kitsos.client.id": context.clientId } : {}),
     ...(requiredScope ? { "kitsos.request.scope": requiredScope } : {}),
   });
 }

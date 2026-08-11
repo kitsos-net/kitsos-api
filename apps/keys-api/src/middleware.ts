@@ -1,13 +1,27 @@
 import type { Context, Next } from "hono";
 import {
   authenticate,
+  annotateAuthenticatedRequest,
   checkRateLimit,
+  recordAuthDecision,
+  recordRateLimitDecision,
   verifyClerkSession,
   ensureUserRow,
 } from "@kitsos/auth";
+import type { AuthContext } from "@kitsos/auth";
 import type { Env } from "./env";
 
 type ContextEnv = { Bindings: Env; Variables: { userId: string } };
+
+function sessionContext(userId: string): AuthContext {
+  return {
+    method: "session",
+    userId,
+    appId: "keys-api",
+    scopes: [],
+    groupIds: [],
+  };
+}
 
 /**
  * Gates a route to Clerk-authenticated users who are members of the
@@ -15,24 +29,44 @@ type ContextEnv = { Bindings: Env; Variables: { userId: string } };
  * downstream handlers on success.
  */
 export async function requireAdmin(c: Context<ContextEnv>, next: Next) {
+  const requiredScope = "account:admin";
   const authHeader = c.req.header("Authorization") ?? "";
   const token = authHeader.replace(/^Bearer\s+/i, "");
-  if (!token) return c.json({ error: "missing-credentials" }, 401);
-  if (token.length > 8192) return c.json({ error: "invalid-credentials" }, 401);
+  if (!token) {
+    recordAuthDecision({ appId: "keys-api", requiredScope, outcome: "denied", reason: "missing-credentials" });
+    return c.json({ error: "missing-credentials" }, 401);
+  }
+  if (token.length > 8192) {
+    recordAuthDecision({ appId: "keys-api", requiredScope, outcome: "denied", reason: "invalid-credentials" });
+    return c.json({ error: "invalid-credentials" }, 401);
+  }
 
   const session = await verifyClerkSession(token, c.env);
-  if (!session) return c.json({ error: "invalid-credentials" }, 401);
+  if (!session) {
+    recordAuthDecision({ appId: "keys-api", requiredScope, outcome: "denied", reason: "invalid-credentials" });
+    return c.json({ error: "invalid-credentials" }, 401);
+  }
 
   await ensureUserRow(session.userId, c.env);
+  const context = sessionContext(session.userId);
+  annotateAuthenticatedRequest(context, "keys-api", requiredScope);
   const user = await c.env.DB.prepare("SELECT status FROM users WHERE id = ?")
     .bind(session.userId)
     .first<{ status: string }>();
-  if (user?.status !== "active") return c.json({ error: "user-inactive" }, 403);
+  if (user?.status !== "active") {
+    recordAuthDecision({ appId: "keys-api", requiredScope, outcome: "denied", reason: "user-inactive", context });
+    return c.json({ error: "user-inactive" }, 403);
+  }
+  const rateBucket = `session:${session.userId}`;
   const rateLimit = await checkRateLimit(c.env, `session:${session.userId}`, {
     windowSeconds: 60,
     maxRequests: 120,
   });
-  if (!rateLimit.allowed) return c.json({ error: rateLimit.reason }, 429);
+  recordRateLimitDecision("keys-api", rateBucket, rateLimit.allowed ? "allowed" : "rate_limited", rateLimit.retryAfterSeconds, rateLimit.reason);
+  if (!rateLimit.allowed) {
+    recordAuthDecision({ appId: "keys-api", requiredScope, outcome: "denied", reason: rateLimit.reason, context });
+    return c.json({ error: rateLimit.reason }, 429);
+  }
 
   const membership = await c.env.DB.prepare(
     "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?"
@@ -40,8 +74,12 @@ export async function requireAdmin(c: Context<ContextEnv>, next: Next) {
     .bind(c.env.ADMIN_GROUP_ID, session.userId)
     .first();
 
-  if (!membership) return c.json({ error: "not-admin" }, 403);
+  if (!membership) {
+    recordAuthDecision({ appId: "keys-api", requiredScope, outcome: "denied", reason: "not-admin", context });
+    return c.json({ error: "not-admin" }, 403);
+  }
 
+  recordAuthDecision({ appId: "keys-api", requiredScope, outcome: "allowed", context });
   c.set("userId", session.userId);
   await next();
 }
@@ -65,24 +103,45 @@ export async function requireUser(c: Context<ContextEnv>, next: Next) {
     await next();
     return;
   }
+  const requiredScope = "account:self";
   const authHeader = c.req.header("Authorization") ?? "";
   const token = authHeader.replace(/^Bearer\s+/i, "");
-  if (!token) return c.json({ error: "missing-credentials" }, 401);
-  if (token.length > 8192) return c.json({ error: "invalid-credentials" }, 401);
+  if (!token) {
+    recordAuthDecision({ appId: "keys-api", requiredScope, outcome: "denied", reason: "missing-credentials" });
+    return c.json({ error: "missing-credentials" }, 401);
+  }
+  if (token.length > 8192) {
+    recordAuthDecision({ appId: "keys-api", requiredScope, outcome: "denied", reason: "invalid-credentials" });
+    return c.json({ error: "invalid-credentials" }, 401);
+  }
 
   const session = await verifyClerkSession(token, c.env);
-  if (!session) return c.json({ error: "invalid-credentials" }, 401);
+  if (!session) {
+    recordAuthDecision({ appId: "keys-api", requiredScope, outcome: "denied", reason: "invalid-credentials" });
+    return c.json({ error: "invalid-credentials" }, 401);
+  }
 
   await ensureUserRow(session.userId, c.env);
+  const context = sessionContext(session.userId);
+  annotateAuthenticatedRequest(context, "keys-api", requiredScope);
   const user = await c.env.DB.prepare("SELECT status FROM users WHERE id = ?")
     .bind(session.userId)
     .first<{ status: string }>();
-  if (user?.status !== "active") return c.json({ error: "user-inactive" }, 403);
-  const rateLimit = await checkRateLimit(c.env, `session:${session.userId}`, {
+  if (user?.status !== "active") {
+    recordAuthDecision({ appId: "keys-api", requiredScope, outcome: "denied", reason: "user-inactive", context });
+    return c.json({ error: "user-inactive" }, 403);
+  }
+  const rateBucket = `session:${session.userId}`;
+  const rateLimit = await checkRateLimit(c.env, rateBucket, {
     windowSeconds: 60,
     maxRequests: 120,
   });
-  if (!rateLimit.allowed) return c.json({ error: rateLimit.reason }, 429);
+  recordRateLimitDecision("keys-api", rateBucket, rateLimit.allowed ? "allowed" : "rate_limited", rateLimit.retryAfterSeconds, rateLimit.reason);
+  if (!rateLimit.allowed) {
+    recordAuthDecision({ appId: "keys-api", requiredScope, outcome: "denied", reason: rateLimit.reason, context });
+    return c.json({ error: rateLimit.reason }, 429);
+  }
+  recordAuthDecision({ appId: "keys-api", requiredScope, outcome: "allowed", context });
   c.set("userId", session.userId);
   await next();
 }

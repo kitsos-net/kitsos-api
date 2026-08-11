@@ -1,7 +1,11 @@
 import type { Env, AuthContext, CheckResult, RateLimitOptions } from "./types";
 import { verifyClerkSession, ensureUserRow } from "./clerk";
 import { acceptPrivateMcpDelegation, mcpDelegationHeaders } from "./delegation";
-import { annotateAuthenticatedRequest } from "./telemetry";
+import {
+  annotateAuthenticatedRequest,
+  recordAuthDecision,
+  recordRateLimitDecision,
+} from "./telemetry";
 import {
   validateApiKey,
   checkScope,
@@ -43,6 +47,8 @@ export {
   acceptPrivateMcpDelegation,
   mcpDelegationHeaders,
   annotateAuthenticatedRequest,
+  recordAuthDecision,
+  recordRateLimitDecision,
 };
 
 export function withRetryAfter(response: Response, result: CheckResult): Response {
@@ -67,10 +73,24 @@ export async function authenticateMcpDelegation(
     || !delegation.grantId
     || !Array.isArray(delegation.scopes)
   ) {
+    recordAuthDecision({
+      appId,
+      requiredScope,
+      outcome: "denied",
+      reason: "invalid-mcp-delegation",
+    });
     return { allowed: false, status: 401, reason: "invalid-mcp-delegation" };
   }
   const policy = await getMcpPolicyScopes(env, delegation.userId, appId);
-  if (!policy) return { allowed: false, status: 401, reason: "invalid-credentials" };
+  if (!policy) {
+    recordAuthDecision({
+      appId,
+      requiredScope,
+      outcome: "denied",
+      reason: "invalid-credentials",
+    });
+    return { allowed: false, status: 401, reason: "invalid-credentials" };
+  }
   const allowed = new Set(expandScopes(policy.scopes));
   const context: AuthContext = {
     method: "mcp",
@@ -81,8 +101,18 @@ export async function authenticateMcpDelegation(
     scopes: expandScopes(delegation.scopes.filter((scope) => allowed.has(scope))),
     groupIds: policy.groupIds,
   };
+  annotateAuthenticatedRequest(context, appId, requiredScope);
   const scopeCheck = checkScope(context, requiredScope);
-  if (!scopeCheck.allowed) return { ...scopeCheck, context };
+  if (!scopeCheck.allowed) {
+    recordAuthDecision({
+      appId,
+      requiredScope,
+      outcome: "denied",
+      reason: scopeCheck.reason,
+      context,
+    });
+    return { ...scopeCheck, context };
+  }
   return { allowed: true, status: 200, context };
 }
 
@@ -120,10 +150,18 @@ export async function authenticate(
       return delegated;
     }
     const context = delegated.context!;
+    const rateBucket = `mcp:${context.userId}:${context.clientId}:${appId}`;
     const rlCheck = await checkRateLimit(
       env,
-      `mcp:${context.userId}:${context.clientId}:${appId}`,
+      rateBucket,
       rateLimit,
+    );
+    recordRateLimitDecision(
+      appId,
+      rateBucket,
+      rlCheck.allowed ? "allowed" : "rate_limited",
+      rlCheck.retryAfterSeconds,
+      rlCheck.reason,
     );
     if (!rlCheck.allowed) {
       await writeAuditLog(env, {
@@ -131,6 +169,13 @@ export async function authenticate(
         appId,
         action: requiredScope,
         result: "denied",
+        reason: rlCheck.reason,
+        context,
+      });
+      recordAuthDecision({
+        appId,
+        requiredScope,
+        outcome: "denied",
         reason: rlCheck.reason,
         context,
       });
@@ -143,15 +188,28 @@ export async function authenticate(
       result: "allowed",
       context,
     });
+    recordAuthDecision({ appId, requiredScope, outcome: "allowed", context });
     return delegated;
   }
   const authHeader = request.headers.get("Authorization") ?? "";
   const token = authHeader.replace(/^Bearer\s+/i, "");
 
   if (!token) {
+    recordAuthDecision({
+      appId,
+      requiredScope,
+      outcome: "denied",
+      reason: "missing-credentials",
+    });
     return { allowed: false, status: 401, reason: "missing-credentials" };
   }
   if (token.length > 8192) {
+    recordAuthDecision({
+      appId,
+      requiredScope,
+      outcome: "denied",
+      reason: "invalid-credentials",
+    });
     return { allowed: false, status: 401, reason: "invalid-credentials" };
   }
 
@@ -177,8 +235,18 @@ export async function authenticate(
   }
 
   if (!context) {
+    recordAuthDecision({
+      appId,
+      requiredScope,
+      outcome: "denied",
+      reason: "invalid-credentials",
+      ...(token.startsWith("kitsos_")
+        ? { keyFingerprint: (await sha256Hex(token)).slice(0, 16) }
+        : {}),
+    });
     return { allowed: false, status: 401, reason: "invalid-credentials" };
   }
+  annotateAuthenticatedRequest(context, appId, requiredScope);
 
   const scopeCheck = checkScope(context, requiredScope);
   if (!scopeCheck.allowed) {
@@ -191,13 +259,30 @@ export async function authenticate(
       reason: scopeCheck.reason,
       context,
     });
+    recordAuthDecision({
+      appId,
+      requiredScope,
+      outcome: "denied",
+      reason: scopeCheck.reason,
+      context,
+    });
     return scopeCheck;
   }
 
+  const rateBucket = context.apiKeyId
+    ? `api-key:${context.apiKeyId}:${appId}`
+    : `session:${context.userId}`;
   const rlCheck = await checkRateLimit(
     env,
-    context.apiKeyId ? `api-key:${context.apiKeyId}:${appId}` : `session:${context.userId}`,
+    rateBucket,
     rateLimit
+  );
+  recordRateLimitDecision(
+    appId,
+    rateBucket,
+    rlCheck.allowed ? "allowed" : "rate_limited",
+    rlCheck.retryAfterSeconds,
+    rlCheck.reason,
   );
   if (!rlCheck.allowed) {
     await writeAuditLog(env, {
@@ -206,6 +291,13 @@ export async function authenticate(
       apiKeyId: context.apiKeyId,
       action: requiredScope,
       result: "denied",
+      reason: rlCheck.reason,
+      context,
+    });
+    recordAuthDecision({
+      appId,
+      requiredScope,
+      outcome: "denied",
       reason: rlCheck.reason,
       context,
     });
@@ -220,6 +312,7 @@ export async function authenticate(
     result: "allowed",
     context,
   });
+  recordAuthDecision({ appId, requiredScope, outcome: "allowed", context });
 
   return { allowed: true, status: 200, context };
 }
@@ -240,16 +333,46 @@ export async function authenticateApiKey(
   const authHeader = request.headers.get("Authorization") ?? "";
   const token = authHeader.replace(/^Bearer\s+/i, "");
 
-  if (!token) return { allowed: false, status: 401, reason: "missing-credentials" };
+  if (!token) {
+    recordAuthDecision({
+      appId,
+      requiredScope,
+      outcome: "denied",
+      reason: "missing-credentials",
+    });
+    return { allowed: false, status: 401, reason: "missing-credentials" };
+  }
   if (token.length > 256) {
+    recordAuthDecision({
+      appId,
+      requiredScope,
+      outcome: "denied",
+      reason: "invalid-credentials",
+    });
     return { allowed: false, status: 401, reason: "invalid-credentials" };
   }
   if (!token.startsWith("kitsos_")) {
+    recordAuthDecision({
+      appId,
+      requiredScope,
+      outcome: "denied",
+      reason: "api-key-required",
+    });
     return { allowed: false, status: 401, reason: "api-key-required" };
   }
 
   const context = await validateApiKey(token, appId, env);
-  if (!context) return { allowed: false, status: 401, reason: "invalid-credentials" };
+  if (!context) {
+    recordAuthDecision({
+      appId,
+      requiredScope,
+      outcome: "denied",
+      reason: "invalid-credentials",
+      keyFingerprint: (await sha256Hex(token)).slice(0, 16),
+    });
+    return { allowed: false, status: 401, reason: "invalid-credentials" };
+  }
+  annotateAuthenticatedRequest(context, appId, requiredScope);
 
   const scopeCheck = checkScope(context, requiredScope);
   if (!scopeCheck.allowed) {
@@ -262,6 +385,13 @@ export async function authenticateApiKey(
       reason: scopeCheck.reason,
       context,
     });
+    recordAuthDecision({
+      appId,
+      requiredScope,
+      outcome: "denied",
+      reason: scopeCheck.reason,
+      context,
+    });
     return scopeCheck;
   }
 
@@ -269,6 +399,13 @@ export async function authenticateApiKey(
     authorization.requiredGroupId !== undefined
     && !authorization.requiredGroupId
   ) {
+    recordAuthDecision({
+      appId,
+      requiredScope,
+      outcome: "denied",
+      reason: "required-group-not-configured",
+      context,
+    });
     return {
       allowed: false,
       status: 503,
@@ -276,7 +413,15 @@ export async function authenticateApiKey(
     };
   }
 
-  const rlCheck = await checkRateLimit(env, context.apiKeyId!, rateLimit);
+  const rateBucket = `api-key:${context.apiKeyId}:${appId}`;
+  const rlCheck = await checkRateLimit(env, rateBucket, rateLimit);
+  recordRateLimitDecision(
+    appId,
+    rateBucket,
+    rlCheck.allowed ? "allowed" : "rate_limited",
+    rlCheck.retryAfterSeconds,
+    rlCheck.reason,
+  );
   if (!rlCheck.allowed) {
     await writeAuditLog(env, {
       userId: context.userId,
@@ -284,6 +429,13 @@ export async function authenticateApiKey(
       apiKeyId: context.apiKeyId,
       action: requiredScope,
       result: "denied",
+      reason: rlCheck.reason,
+      context,
+    });
+    recordAuthDecision({
+      appId,
+      requiredScope,
+      outcome: "denied",
       reason: rlCheck.reason,
       context,
     });
@@ -314,6 +466,13 @@ export async function authenticateApiKey(
         reason: denied.reason,
         context,
       });
+      recordAuthDecision({
+        appId,
+        requiredScope,
+        outcome: "denied",
+        reason: denied.reason,
+        context,
+      });
       return denied;
     }
   }
@@ -326,6 +485,7 @@ export async function authenticateApiKey(
     result: "allowed",
     context,
   });
+  recordAuthDecision({ appId, requiredScope, outcome: "allowed", context });
 
   return { allowed: true, status: 200, context };
 }

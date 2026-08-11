@@ -18,7 +18,7 @@ import {
   verifyClerkSession,
   writeAuditLog,
 } from "@kitsos/auth";
-import { withTelemetry } from "@kitsos/telemetry";
+import { recordEvent, withTelemetry } from "@kitsos/telemetry";
 import { requireAdmin, requireUser } from "./middleware";
 import analytics from "./analytics";
 import { boundedLimit, boundedOffset, isNonEmptyString, isStringArray } from "./validation";
@@ -355,6 +355,10 @@ admin.post("/apps", async (c) => {
   )
     .bind(body.id, body.name, body.description ?? null, body.environment ?? "production")
     .run();
+  recordEvent("keys.app.create", "success", {
+    "kitsos.app.id": body.id,
+    "kitsos.user.id": c.get("userId"),
+  });
   return c.json({ id: body.id }, 201);
 });
 
@@ -370,6 +374,10 @@ admin.delete("/apps/:appId", async (c) => {
     return c.json({ error: "app-has-dependencies" }, 409);
   }
   await c.env.DB.prepare("DELETE FROM apps WHERE id = ?").bind(appId).run();
+  recordEvent("keys.app.delete", "success", {
+    "kitsos.app.id": appId,
+    "kitsos.user.id": c.get("userId"),
+  });
   return c.body(null, 204);
 });
 
@@ -392,6 +400,11 @@ admin.post("/apps/:appId/scopes", async (c) => {
   )
     .bind(appId, body.scope, body.description ?? null)
     .run();
+  recordEvent("keys.scope.create", "success", {
+    "kitsos.app.id": appId,
+    "kitsos.scope": body.scope,
+    "kitsos.user.id": c.get("userId"),
+  });
   return c.json({ appId, scope: body.scope }, 201);
 });
 
@@ -401,6 +414,11 @@ admin.delete("/apps/:appId/scopes/:scope", async (c) => {
     .bind(appId, c.req.param("scope"))
     .run();
   await invalidateAppApiKeyCaches(c.env, appId);
+  recordEvent("keys.scope.delete", "success", {
+    "kitsos.app.id": appId,
+    "kitsos.scope": c.req.param("scope"),
+    "kitsos.user.id": c.get("userId"),
+  });
   return c.body(null, 204);
 });
 
@@ -423,6 +441,11 @@ admin.patch("/users/:userId", async (c) => {
     .bind(body.status, c.req.param("userId"))
     .run();
   await invalidateUserApiKeyCaches(c.env, c.req.param("userId"));
+  recordEvent("keys.user.update", "success", {
+    "kitsos.user.id": c.get("userId"),
+    "kitsos.target_user.id": c.req.param("userId"),
+    "kitsos.user.status": body.status,
+  });
   return c.body(null, 204);
 });
 
@@ -451,6 +474,10 @@ admin.post("/groups", async (c) => {
   await c.env.DB.prepare("INSERT INTO groups (id, name, description) VALUES (?, ?, ?)")
     .bind(groupId, body.name, body.description ?? null)
     .run();
+  recordEvent("keys.group.create", "success", {
+    "kitsos.group.id": groupId,
+    "kitsos.user.id": c.get("userId"),
+  });
   return c.json({ id: groupId }, 201);
 });
 
@@ -466,6 +493,10 @@ admin.delete("/groups/:groupId", async (c) => {
     return c.json({ error: "group-has-dependencies" }, 409);
   }
   await c.env.DB.prepare("DELETE FROM groups WHERE id = ?").bind(groupId).run();
+  recordEvent("keys.group.delete", "success", {
+    "kitsos.group.id": groupId,
+    "kitsos.user.id": c.get("userId"),
+  });
   return c.body(null, 204);
 });
 
@@ -478,6 +509,11 @@ admin.post("/groups/:groupId/members", async (c) => {
     .bind(c.req.param("groupId"), body.userId)
     .run();
   await invalidateUserApiKeyCaches(c.env, body.userId);
+  recordEvent("keys.group.member.add", "success", {
+    "kitsos.group.id": c.req.param("groupId"),
+    "kitsos.target_user.id": body.userId,
+    "kitsos.user.id": c.get("userId"),
+  });
   return c.body(null, 204);
 });
 
@@ -486,6 +522,11 @@ admin.delete("/groups/:groupId/members/:userId", async (c) => {
     .bind(c.req.param("groupId"), c.req.param("userId"))
     .run();
   await invalidateUserApiKeyCaches(c.env, c.req.param("userId"));
+  recordEvent("keys.group.member.remove", "success", {
+    "kitsos.group.id": c.req.param("groupId"),
+    "kitsos.target_user.id": c.req.param("userId"),
+    "kitsos.user.id": c.get("userId"),
+  });
   return c.body(null, 204);
 });
 
@@ -544,6 +585,12 @@ admin.post("/policies", async (c) => {
   } else {
     await invalidateGroupApiKeyCaches(c.env, body.subjectId, body.appId);
   }
+  recordEvent("keys.policy.create", "success", {
+    "kitsos.policy.id": policyId,
+    "kitsos.app.id": body.appId,
+    "kitsos.policy.subject_type": body.subjectType,
+    "kitsos.user.id": c.get("userId"),
+  });
   return c.json({ id: policyId }, 201);
 });
 
@@ -560,6 +607,12 @@ admin.delete("/policies/:policyId", async (c) => {
   } else {
     await invalidateGroupApiKeyCaches(c.env, policy.subject_id, policy.app_id);
   }
+  recordEvent("keys.policy.delete", "success", {
+    "kitsos.policy.id": c.req.param("policyId"),
+    "kitsos.app.id": policy.app_id,
+    "kitsos.policy.subject_type": policy.subject_type,
+    "kitsos.user.id": c.get("userId"),
+  });
   return c.body(null, 204);
 });
 
@@ -655,6 +708,12 @@ admin.post("/api-keys", async (c) => {
   }
 
   // rawKey is only ever shown here — not recoverable afterwards
+  recordEvent("keys.api_key.create", "success", {
+    "kitsos.api_key.id": keyId,
+    "kitsos.target_user.id": body.userId,
+    "kitsos.user.id": c.get("userId"),
+    "kitsos.api_key.admin_action": true,
+  });
   return c.json({ id: keyId, key: rawKey, permissions }, 201);
 });
 
@@ -663,6 +722,11 @@ admin.delete("/api-keys/:keyId", async (c) => {
   await c.env.DB.prepare("DELETE FROM api_keys WHERE id = ?")
     .bind(c.req.param("keyId"))
     .run();
+  recordEvent("keys.api_key.revoke", "success", {
+    "kitsos.api_key.id": c.req.param("keyId"),
+    "kitsos.user.id": c.get("userId"),
+    "kitsos.api_key.admin_action": true,
+  });
   return c.body(null, 204);
 });
 
@@ -683,6 +747,12 @@ admin.post("/api-keys/:keyId/rotate", async (c) => {
     action: "api_key.rotate.admin",
     result: "allowed",
     reason: `replaced:${keyId}`,
+  });
+  recordEvent("keys.api_key.rotate", "success", {
+    "kitsos.api_key.id": result.id,
+    "kitsos.api_key.replaced_id": keyId,
+    "kitsos.user.id": c.get("userId"),
+    "kitsos.api_key.admin_action": true,
   });
   return c.json(result, 201);
 });
@@ -738,6 +808,15 @@ admin.post("/usage-limits", async (c) => {
   )
     .bind(limitId, body.userId, body.appId, body.limitType, body.limitValue, body.isOverride ? 1 : 0)
     .run();
+  recordEvent("keys.usage_limit.upsert", "success", {
+    "kitsos.usage_limit.id": limitId,
+    "kitsos.target_user.id": body.userId,
+    "kitsos.app.id": body.appId,
+    "limit.type": body.limitType,
+    "limit.value": body.limitValue,
+    "limit.override": body.isOverride ?? false,
+    "kitsos.user.id": c.get("userId"),
+  });
   return c.json({ id: limitId }, 201);
 });
 
@@ -786,6 +865,14 @@ admin.post("/limit-increase-requests/:reqId/approve", async (c) => {
     ).bind(adminId, reqId),
   ]);
 
+  recordEvent("keys.limit_request.approve", "success", {
+    "kitsos.limit_request.id": reqId,
+    "kitsos.target_user.id": req.user_id,
+    "kitsos.app.id": req.app_id,
+    "limit.type": req.limit_type,
+    "limit.value": req.requested_value,
+    "kitsos.user.id": adminId,
+  });
   return c.body(null, 204);
 });
 
@@ -799,6 +886,10 @@ admin.post("/limit-increase-requests/:reqId/deny", async (c) => {
     .bind(adminId, c.req.param("reqId"))
     .run();
   if (result.meta.changes !== 1) return c.json({ error: "not-found-or-already-reviewed" }, 409);
+  recordEvent("keys.limit_request.deny", "success", {
+    "kitsos.limit_request.id": c.req.param("reqId"),
+    "kitsos.user.id": adminId,
+  });
   return c.body(null, 204);
 });
 
@@ -970,6 +1061,11 @@ me.post("/session-api-key", async (c) => {
     action: "session_api_key.create",
     result: "allowed",
   });
+  recordEvent("keys.session_api_key.create", "success", {
+    "kitsos.api_key.id": keyId,
+    "kitsos.user.id": userId,
+    "kitsos.session.app_count": permissions.length,
+  });
   return c.json({ id: keyId, key: rawKey, permissions, expiresAt }, 201);
 });
 
@@ -1054,6 +1150,11 @@ me.post("/api-keys", async (c) => {
     throw error;
   }
 
+  recordEvent("keys.api_key.create", "success", {
+    "kitsos.api_key.id": keyId,
+    "kitsos.user.id": userId,
+    "kitsos.api_key.admin_action": false,
+  });
   return c.json({ id: keyId, key: rawKey, permissions }, 201);
 });
 
@@ -1062,6 +1163,11 @@ me.delete("/api-keys/:keyId", async (c) => {
   await c.env.DB.prepare("DELETE FROM api_keys WHERE id = ? AND user_id = ?")
     .bind(c.req.param("keyId"), c.get("userId"))
     .run();
+  recordEvent("keys.api_key.revoke", "success", {
+    "kitsos.api_key.id": c.req.param("keyId"),
+    "kitsos.user.id": c.get("userId"),
+    "kitsos.api_key.admin_action": false,
+  });
   return c.body(null, 204);
 });
 
@@ -1083,6 +1189,12 @@ me.post("/api-keys/:keyId/rotate", async (c) => {
     action: "api_key.rotate",
     result: "allowed",
     reason: `replaced:${keyId}`,
+  });
+  recordEvent("keys.api_key.rotate", "success", {
+    "kitsos.api_key.id": result.id,
+    "kitsos.api_key.replaced_id": keyId,
+    "kitsos.user.id": userId,
+    "kitsos.api_key.admin_action": false,
   });
   return c.json(result, 201);
 });
@@ -1160,6 +1272,13 @@ me.post("/limit-increase-requests", async (c) => {
     }
     throw error;
   }
+  recordEvent("keys.limit_request.create", "success", {
+    "kitsos.limit_request.id": reqId,
+    "kitsos.user.id": userId,
+    "kitsos.app.id": body.appId,
+    "limit.type": body.limitType,
+    "limit.value": body.requestedValue,
+  });
   return c.json({ id: reqId }, 201);
 });
 
