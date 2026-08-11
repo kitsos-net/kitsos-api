@@ -1,8 +1,13 @@
 openapi: 3.0.3
 info:
   title: Kitsos Hide My Email API
-  version: "1.0.0"
-  description: Manage forwarding aliases. Every destination address must have a current resource grant. Metadata bodies are limited to 64 KiB and inbound messages to 10 MiB.
+  version: "1.0.1"
+  description: >
+    Manage forwarding aliases. Every destination address must have a current
+    Kitsos email_address resource grant and a verified Cloudflare Email Routing
+    destination. After Kitsos verification, request the Cloudflare confirmation:
+    Cloudflare emails the destination directly and no Cloudflare account is
+    required. Metadata bodies are limited to 64 KiB and inbound messages to 10 MiB.
 servers:
   - url: https://hme.api.kitsos.net/v1
 
@@ -79,8 +84,8 @@ paths:
                 forwardTo:
                   type: string
                   format: email
-                  maxLength: 320
-                  description: Must have a current email_address grant with hme:receive.
+                  maxLength: 90
+                  description: Must have a current email_address grant with hme:receive and a verified Cloudflare Email Routing destination.
                 label: { type: string, maxLength: 200 }
       responses:
         "201": { description: Created }
@@ -88,7 +93,7 @@ paths:
           description: Invalid request body
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "403":
-          description: Destination address is not granted
+          description: Destination address is not granted or its Cloudflare confirmation is pending/not requested
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "429":
           description: Rate or alias limit exceeded
@@ -108,16 +113,59 @@ paths:
               properties:
                 status: { type: string, enum: [active, disabled] }
                 label: { type: string, maxLength: 200 }
-                forwardTo: { type: string, format: email, maxLength: 320 }
+                forwardTo: { type: string, format: email, maxLength: 90 }
       responses:
         "204": { description: Updated }
         "400":
           description: Invalid request body
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "403":
-          description: Destination address is not granted
+          description: Destination address is not granted or its Cloudflare confirmation is pending/not requested
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
     delete:
       summary: Delete an alias
       responses:
         "204": { description: Deleted or already absent }
+
+  /destinations:
+    get:
+      summary: List the caller's Cloudflare forwarding-destination statuses
+      responses:
+        "200": { description: Destination addresses and their pending or verified Cloudflare status }
+    post:
+      summary: Request Cloudflare confirmation for a Kitsos-verified forwarding address
+      description: >
+        Cloudflare sends the confirmation email directly to forwardTo. No
+        Cloudflare account is required. This endpoint only accepts an address
+        already verified by the authenticated user through Kitsos Verify.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [forwardTo]
+              properties:
+                forwardTo: { type: string, format: email, maxLength: 90 }
+      responses:
+        "200": { description: Destination already exists; returns its status }
+        "201": { description: Cloudflare destination created; confirmation email sent if pending }
+        "403": { description: Address has not been verified by the caller through Kitsos Verify }
+        "502": { description: Cloudflare destination request failed }
+
+  /destinations/check:
+    post:
+      summary: Refresh one forwarding address's Cloudflare confirmation status
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [forwardTo]
+              properties:
+                forwardTo: { type: string, format: email, maxLength: 320 }
+      responses:
+        "200": { description: Current Cloudflare status, pending or verified }
+        "403": { description: Address has not been verified by the caller through Kitsos Verify }
+        "502": { description: Cloudflare destination status check failed }
