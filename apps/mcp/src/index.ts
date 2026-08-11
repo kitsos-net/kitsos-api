@@ -8,7 +8,6 @@ import {
 } from "@kitsos/auth";
 import { withTelemetry } from "@kitsos/telemetry";
 import { createMcpHandler } from "agents/mcp/server";
-import { SpanStatusCode, trace } from "@opentelemetry/api";
 import { authHandler } from "./auth-handler";
 import type { Env, McpProps, ToolContext } from "./env";
 import {
@@ -174,7 +173,6 @@ function validateRegistration(requestBody: Uint8Array): Response | null {
 
 export class McpApiHandler extends WorkerEntrypoint<Env, McpProps> {
   async fetch(request: Request): Promise<Response> {
-    const requestSpan = trace.getActiveSpan();
     const props: unknown = this.ctx.props;
     if (!isMcpProps(props)) {
       recordAuthDecision({
@@ -254,7 +252,6 @@ export class McpApiHandler extends WorkerEntrypoint<Env, McpProps> {
     const context: ToolContext = {
       env: this.env,
       scopes,
-      telemetry: {},
       delegation: {
         userId: props.userId,
         clientId: props.clientId,
@@ -271,26 +268,7 @@ export class McpApiHandler extends WorkerEntrypoint<Env, McpProps> {
         authContext: { props: { ...props } },
       },
     );
-    const response = await handler(request, this.env, this.ctx);
-    if (context.telemetry.toolName) {
-      requestSpan?.setAttributes({
-        "kitsos.mcp.tool.name": context.telemetry.toolName,
-        "kitsos.mcp.upstream.service": context.telemetry.upstreamService ?? "unknown",
-        "http.upstream.status_code": context.telemetry.upstreamStatus ?? 0,
-      });
-      requestSpan?.addEvent("mcp.tool.call", {
-        "event.category": "mcp",
-        "event.outcome": context.telemetry.outcome ?? "error",
-        "kitsos.mcp.tool.name": context.telemetry.toolName,
-        "kitsos.mcp.upstream.service": context.telemetry.upstreamService ?? "unknown",
-        "http.upstream.status_code": context.telemetry.upstreamStatus ?? 0,
-        ...(context.telemetry.reason ? { "event.reason": context.telemetry.reason } : {}),
-      });
-      if (context.telemetry.outcome === "error") {
-        requestSpan?.setStatus({ code: SpanStatusCode.ERROR });
-      }
-    }
-    return response;
+    return handler(request, this.env, this.ctx);
   }
 }
 

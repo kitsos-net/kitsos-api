@@ -22,48 +22,12 @@ export async function callUpstream(
   toolName: string,
   call: UpstreamCall,
 ): Promise<UpstreamResult> {
-  try {
-    const result = await callUpstreamRequest(context, call);
-    recordToolResult(context, toolName, call.service, result);
-    return result;
-  } catch (error) {
-    recordToolResult(context, toolName, call.service, {
-      ok: false,
-      status: 0,
-      data: { error: "upstream-fetch-failed" },
-    });
-    throw error;
-  }
-}
-
-function recordToolResult(
-  context: ToolContext,
-  toolName: string,
-  service: UpstreamName,
-  result: UpstreamResult,
-): void {
-  const errorCode = !result.ok
-    && typeof result.data === "object"
-    && result.data !== null
-    && typeof (result.data as { error?: unknown }).error === "string"
-    ? (result.data as { error: string }).error
-    : undefined;
-  context.telemetry.toolName = toolName;
-  context.telemetry.upstreamService = service.toLowerCase();
-  context.telemetry.upstreamStatus = result.status;
-  context.telemetry.outcome = result.ok ? "success" : "error";
-  context.telemetry.reason = errorCode;
-}
-
-async function callUpstreamRequest(
-  context: ToolContext,
-  call: UpstreamCall,
-): Promise<UpstreamResult> {
   const url = new URL(call.path, `https://${call.service.toLowerCase()}.internal`);
   for (const [name, value] of Object.entries(call.query ?? {})) {
     if (value !== undefined) url.searchParams.set(name, String(value));
   }
   const headers = mcpDelegationHeaders(context.delegation);
+  headers.set("X-Kitsos-MCP-Tool", toolName);
   headers.set("Accept", "application/json, text/plain;q=0.9");
   const init: RequestInit = {
     method: call.method ?? "GET",

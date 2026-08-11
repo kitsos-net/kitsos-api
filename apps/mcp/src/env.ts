@@ -28,11 +28,4 @@ export interface ToolContext {
   env: Env;
   delegation: McpDelegation;
   scopes: Set<string>;
-  telemetry: {
-    toolName?: string;
-    upstreamService?: string;
-    upstreamStatus?: number;
-    outcome?: "success" | "error";
-    reason?: string;
-  };
 }

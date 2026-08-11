@@ -187,7 +187,8 @@ if grep -Eq '^[[:space:]]*redirect: "error"' apps/mail/src/template.ts; then
 fi
 
 test "$(grep -c 'callUpstream(context, "kitsos_' apps/mcp/src/tools.ts)" -eq 28
-grep -q 'requestSpan?.addEvent("mcp.tool.call"' apps/mcp/src/index.ts
+grep -q 'headers.set("X-Kitsos-MCP-Tool"' apps/mcp/src/upstream.ts
+grep -q 'span?.addEvent("mcp.tool.call"' packages/telemetry/src/index.ts
 grep -q '"db.statement"' packages/telemetry/src/index.ts
 grep -q '"db.cf.kv.key"' packages/telemetry/src/index.ts
 grep -q 'recordAuthDecision' packages/auth/src/index.ts

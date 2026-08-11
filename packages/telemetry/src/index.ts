@@ -241,6 +241,8 @@ export function withTelemetry<Env extends TelemetryEnv>(
         ...handler,
         async fetch(request, env, ctx) {
           const span = trace.getActiveSpan();
+          const rawMcpTool = request.headers.get("X-Kitsos-MCP-Tool") ?? "";
+          const mcpTool = /^[a-z0-9_]{1,100}$/.test(rawMcpTool) ? rawMcpTool : undefined;
           const authorization = request.headers.get("Authorization") ?? "";
           const presentedToken = authorization.replace(/^Bearer\s+/i, "");
           const apiKeyUsed = presentedToken.startsWith("kitsos_");
@@ -254,11 +256,27 @@ export function withTelemetry<Env extends TelemetryEnv>(
                 ? "bearer"
                 : "anonymous",
             "cloudflare.ray_id": request.headers.get("CF-Ray") ?? "",
+            ...(mcpTool ? { "kitsos.mcp.tool.name": mcpTool } : {}),
           });
 
           try {
             const response = await originalFetch.call(handler, request, env, ctx);
             span?.setAttributes(requestAttributes(request, response.status));
+            if (mcpTool) {
+              span?.setAttributes({
+                "kitsos.mcp.tool.name": mcpTool,
+                "kitsos.mcp.upstream.service": serviceName,
+                "http.upstream.status_code": response.status,
+              });
+              span?.addEvent("mcp.tool.call", {
+                "event.category": "mcp",
+                "event.outcome": response.ok ? "success" : "error",
+                "kitsos.mcp.tool.name": mcpTool,
+                "kitsos.mcp.upstream.service": serviceName,
+                "http.upstream.status_code": response.status,
+                ...(!response.ok ? { "event.reason": `upstream-http-${response.status}` } : {}),
+              });
+            }
             if (response.status >= 500) {
               span?.setStatus({ code: SpanStatusCode.ERROR });
             }
@@ -267,6 +285,21 @@ export function withTelemetry<Env extends TelemetryEnv>(
             const attributes = requestAttributes(request, 500);
             attributes["kitsos.request.reason"] = "unhandled-exception";
             span?.setAttributes(attributes);
+            if (mcpTool) {
+              span?.setAttributes({
+                "kitsos.mcp.tool.name": mcpTool,
+                "kitsos.mcp.upstream.service": serviceName,
+                "http.upstream.status_code": 500,
+              });
+              span?.addEvent("mcp.tool.call", {
+                "event.category": "mcp",
+                "event.outcome": "error",
+                "event.reason": "unhandled-exception",
+                "kitsos.mcp.tool.name": mcpTool,
+                "kitsos.mcp.upstream.service": serviceName,
+                "http.upstream.status_code": 500,
+              });
+            }
             span?.setStatus({ code: SpanStatusCode.ERROR });
             throw error;
           }
