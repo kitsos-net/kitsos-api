@@ -230,6 +230,18 @@ async function deleteResourceOwnership(
       `DELETE FROM resource_verifications
        WHERE resource_id = ? ${userId ? "AND user_id = ?" : ""}`
     ).bind(resourceId, ...(userId ? [userId] : [])),
+    // The Cloudflare destination belongs to the global resource, not one
+    // grant. Keep it while another owner still has a verification or grant.
+    env.DB.prepare(
+      `DELETE FROM hme_cloudflare_destinations
+       WHERE resource_id = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM resource_grants WHERE resource_id = ?
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM resource_verifications WHERE resource_id = ?
+         )`
+    ).bind(resourceId, resourceId, resourceId),
     env.DB.prepare(
       `DELETE FROM resources
        WHERE id = ?

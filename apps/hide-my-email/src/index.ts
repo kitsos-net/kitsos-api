@@ -53,6 +53,100 @@ function pagination(limitValue?: string, offsetValue?: string) {
     : null;
 }
 
+type CloudflareDestination = {
+  id: string;
+  email: string;
+  verified: string | null;
+};
+
+type CloudflareResponse<T> = {
+  success: boolean;
+  result: T;
+  errors?: Array<{ message?: string }>;
+};
+
+async function cloudflareEmailRouting<T>(env: Env, path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${env.CF_EMAIL_API_TOKEN}`,
+      "Content-Type": "application/json",
+      ...init?.headers,
+    },
+  });
+  const payload = await response.json<CloudflareResponse<T>>().catch(() => null);
+  if (!response.ok || !payload?.success) {
+    throw new Error(payload?.errors?.[0]?.message ?? "cloudflare-email-routing-request-failed");
+  }
+  return payload.result;
+}
+
+async function findCloudflareDestination(env: Env, email: string): Promise<CloudflareDestination | null> {
+  for (let page = 1; page <= 4; page++) {
+    const destinations = await cloudflareEmailRouting<CloudflareDestination[]>(
+      env,
+      `/email/routing/addresses?page=${page}&per_page=50&verified=false`,
+    );
+    const match = destinations.find((destination) => destination.email.toLowerCase() === email);
+    if (match) return match;
+    if (destinations.length < 50) break;
+  }
+  // A verified-only filter cannot find pending addresses. Query the remaining
+  // verified addresses separately so existing destinations are never recreated.
+  for (let page = 1; page <= 4; page++) {
+    const destinations = await cloudflareEmailRouting<CloudflareDestination[]>(
+      env,
+      `/email/routing/addresses?page=${page}&per_page=50&verified=true`,
+    );
+    const match = destinations.find((destination) => destination.email.toLowerCase() === email);
+    if (match) return match;
+    if (destinations.length < 50) break;
+  }
+  return null;
+}
+
+async function saveDestination(env: Env, resourceId: string, destination: CloudflareDestination): Promise<"pending" | "verified"> {
+  const status = destination.verified ? "verified" : "pending";
+  await env.DB.prepare(
+    `INSERT INTO hme_cloudflare_destinations
+       (resource_id, destination_id, status, verified_at, last_checked_at)
+     VALUES (?, ?, ?, ?, unixepoch())
+     ON CONFLICT(resource_id) DO UPDATE SET
+       destination_id = excluded.destination_id,
+       status = excluded.status,
+       verified_at = excluded.verified_at,
+       last_checked_at = unixepoch()`
+  )
+    .bind(resourceId, destination.id, status, destination.verified ? Math.floor(Date.parse(destination.verified) / 1000) : null)
+    .run();
+  return status;
+}
+
+async function cloudflareDestinationStatus(env: Env, resourceId: string): Promise<"missing" | "pending" | "verified"> {
+  const saved = await env.DB.prepare(
+    "SELECT destination_id FROM hme_cloudflare_destinations WHERE resource_id = ?"
+  ).bind(resourceId).first<{ destination_id: string }>();
+  if (!saved) return "missing";
+  const destination = await cloudflareEmailRouting<CloudflareDestination>(
+    env,
+    `/email/routing/addresses/${saved.destination_id}`,
+  );
+  return saveDestination(env, resourceId, destination);
+}
+
+async function resourceForDestination(env: Env, userId: string, email: string): Promise<{ id: string } | null> {
+  return env.DB.prepare(
+    `SELECT r.id
+     FROM resources r
+     JOIN resource_grants rg ON rg.resource_id = r.id
+     JOIN resource_verifications rv ON rv.id = rg.verification_id
+     WHERE r.resource_type = 'email_address' AND r.value = ? AND rg.user_id = ?
+       AND rv.verified_at IS NOT NULL
+       AND (rv.grace_expires_at IS NULL OR rv.grace_expires_at >= unixepoch())
+     LIMIT 1`
+  ).bind(email, userId).first<{ id: string }>();
+}
+
 app.get("/health", (c) => c.json({ ok: true }));
 
 app.get("/aliases", async (c) => {
@@ -68,6 +162,76 @@ app.get("/aliases", async (c) => {
   return c.json(r.results);
 });
 
+// Cloudflare must independently confirm every forwarding destination before
+// message.forward() can relay to it.  We only create that confirmation after
+// Kitsos has already verified that the authenticated user owns the address.
+app.get("/destinations", async (c) => {
+  const auth = await authenticate(c.req.raw, c.env, "hme:read", APP_ID);
+  if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
+  const r = await c.env.DB.prepare(
+    `SELECT r.value AS email, d.status, d.verified_at, d.last_checked_at
+     FROM hme_cloudflare_destinations d
+     JOIN resources r ON r.id = d.resource_id
+     JOIN resource_grants rg ON rg.resource_id = r.id
+     WHERE rg.user_id = ?
+     ORDER BY d.created_at DESC`
+  ).bind(auth.context!.userId).all();
+  return c.json(r.results);
+});
+
+app.post("/destinations", async (c) => {
+  const auth = await authenticate(c.req.raw, c.env, "hme:manage", APP_ID);
+  if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
+  const body = await c.req.json<{ forwardTo?: string }>().catch(() => null);
+  if (!body || typeof body.forwardTo !== "string" || !EMAIL_PATTERN.test(body.forwardTo) || body.forwardTo.length > 90) {
+    return c.json({ error: "invalid-request-body" }, 400);
+  }
+  const forwardTo = body.forwardTo.trim().toLowerCase();
+  const resource = await resourceForDestination(c.env, auth.context!.userId, forwardTo);
+  if (!resource) return c.json({ error: "resource-not-granted" }, 403);
+
+  try {
+    const existing = await findCloudflareDestination(c.env, forwardTo);
+    const destination = existing ?? await cloudflareEmailRouting<CloudflareDestination>(
+      c.env,
+      "/email/routing/addresses",
+      { method: "POST", body: JSON.stringify({ email: forwardTo }) },
+    );
+    const status = await saveDestination(c.env, resource.id, destination);
+    return c.json({ email: forwardTo, status, confirmationEmailSent: !existing && status === "pending" }, existing ? 200 : 201);
+  } catch {
+    return c.json({ error: "cloudflare-destination-request-failed" }, 502);
+  }
+});
+
+app.post("/destinations/check", async (c) => {
+  const auth = await authenticate(c.req.raw, c.env, "hme:read", APP_ID);
+  if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
+  const body = await c.req.json<{ forwardTo?: string }>().catch(() => null);
+  if (!body || typeof body.forwardTo !== "string" || !EMAIL_PATTERN.test(body.forwardTo) || body.forwardTo.length > 90) {
+    return c.json({ error: "invalid-request-body" }, 400);
+  }
+  const forwardTo = body.forwardTo.trim().toLowerCase();
+  const resource = await resourceForDestination(c.env, auth.context!.userId, forwardTo);
+  if (!resource) return c.json({ error: "resource-not-granted" }, 403);
+  try {
+    const status = await cloudflareDestinationStatus(c.env, resource.id);
+    return c.json({ email: forwardTo, status }, 200);
+  } catch {
+    return c.json({ error: "cloudflare-destination-check-failed" }, 502);
+  }
+});
+
+async function requireCloudflareDestination(env: Env, resourceId: string): Promise<string | null> {
+  try {
+    const status = await cloudflareDestinationStatus(env, resourceId);
+    if (status === "verified") return null;
+    return status === "pending" ? "cloudflare-destination-pending" : "cloudflare-destination-not-requested";
+  } catch {
+    return "cloudflare-destination-check-failed";
+  }
+}
+
 app.post("/aliases", async (c) => {
   const auth = await authenticate(c.req.raw, c.env, "hme:manage", APP_ID);
   if (!auth.allowed) return c.json({ error: auth.reason }, auth.status as 401 | 403 | 429);
@@ -78,7 +242,7 @@ app.post("/aliases", async (c) => {
     !body
     || typeof body.forwardTo !== "string"
     || !EMAIL_PATTERN.test(body.forwardTo)
-    || body.forwardTo.length > 320
+    || body.forwardTo.length > 90
     || (body.label !== undefined && (typeof body.label !== "string" || body.label.length > 200))
   ) {
     return c.json({ error: "invalid-request-body" }, 400);
@@ -87,6 +251,10 @@ app.post("/aliases", async (c) => {
 
   const grant = await checkResourceGrant(c.env, ctx, "email_address", forwardTo);
   if (!grant.allowed) return c.json({ error: grant.reason }, 403);
+  const resource = await resourceForDestination(c.env, ctx.userId, forwardTo);
+  if (!resource) return c.json({ error: "resource-not-granted" }, 403);
+  const destinationError = await requireCloudflareDestination(c.env, resource.id);
+  if (destinationError) return c.json({ error: destinationError }, destinationError.endsWith("failed") ? 502 : 403);
 
   const withinHardCreationLimit = await consumeHardDailyLimit(
     c.env,
@@ -149,20 +317,25 @@ app.patch("/aliases/:aliasId", async (c) => {
     || (body.forwardTo !== undefined && (
       typeof body.forwardTo !== "string"
       || !EMAIL_PATTERN.test(body.forwardTo)
-      || body.forwardTo.length > 320
+      || body.forwardTo.length > 90
     ))
   ) {
     return c.json({ error: "invalid-request-body" }, 400);
   }
 
   if (body.forwardTo) {
+    const forwardTo = body.forwardTo.trim().toLowerCase();
     const grant = await checkResourceGrant(
       c.env,
       ctx,
       "email_address",
-      body.forwardTo.trim().toLowerCase()
+      forwardTo
     );
     if (!grant.allowed) return c.json({ error: grant.reason }, 403);
+    const resource = await resourceForDestination(c.env, ctx.userId, forwardTo);
+    if (!resource) return c.json({ error: "resource-not-granted" }, 403);
+    const destinationError = await requireCloudflareDestination(c.env, resource.id);
+    if (destinationError) return c.json({ error: destinationError }, destinationError.endsWith("failed") ? 502 : 403);
   }
 
   const updates: string[] = [];

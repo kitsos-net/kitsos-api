@@ -2,6 +2,8 @@ name = "hide-my-email"
 main = "src/index.ts"
 compatibility_date = "2026-07-01"
 compatibility_flags = ["nodejs_compat"]
+[vars]
+CF_ACCOUNT_ID = "20c270570eda3ae89ef7d7a6d2ca1c8f"
 routes = [
   { pattern = "hme.api.kitsos.net", custom_domain = true }
 ]
@@ -24,10 +26,12 @@ id = "4823ab0d3fd6452e8437631a3717f2b5"
 #   CLERK_PUBLISHABLE_KEY
 #   AXIOM_TOKEN
 #   AXIOM_DATASET
-#   CF_EMAIL_API_TOKEN   (manages Email Routing addresses + rules — account-level "addresses" scope works, zone-level "rules" scope confirmed working against the kitsos.net zone)
+#   CF_EMAIL_API_TOKEN   (manages Email Routing destination addresses; the API
+#                         requests Cloudflare's recipient confirmation after a
+#                         user has verified their address with Kitsos)
 
 # NOT set here — manual Cloudflare dashboard steps required (see README):
 #   1. Enable Email Routing for the hme.kitsos.net zone
 #   2. Add a catch-all (or per-alias) route pointing to this worker's `email()` handler
-#   3. Destination addresses used in `forward_to` must be verified in Email Routing first —
-#      Cloudflare will not relay to unverified addresses
+#   3. The API handles destination-address confirmation requests; Cloudflare
+#      will not relay to an address until the recipient confirms its email.

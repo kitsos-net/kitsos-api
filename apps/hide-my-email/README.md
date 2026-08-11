@@ -10,11 +10,19 @@ through the API route — see manual setup below.
 Auth: `kitsos_...` API key with `hme:manage` scope (via `@kitsos/auth`).
 
 - `GET /aliases` — list your own aliases
+- `GET /destinations` — list forwarding destinations and their Cloudflare
+  confirmation state
+- `POST /destinations` `{forwardTo}` — requests Cloudflare's independent
+  forwarding confirmation after Kitsos has verified the address. Cloudflare
+  sends that confirmation directly to `forwardTo`; the user does not need a
+  Cloudflare account.
+- `POST /destinations/check` `{forwardTo}` — refresh the confirmation state
 - `POST /aliases` `{forwardTo, label?}` → generates a random alias,
   returns `{id, email, forwardTo}`. `forwardTo` must be a
   `resource_grants` entry (`resourceType: "email_address"`, scope
-  `hme:receive`) — same verify-first pattern as `mail`'s `from`
-  address.
+  `hme:receive`) and have Cloudflare's forwarding confirmation — same
+  verify-first pattern as `mail`'s `from` address, plus the confirmation
+  required by the mail relay.
 - `PATCH /aliases/:id` `{status?, label?, forwardTo?}` — disable/
   re-enable, rename, or change the forwarding target
 - `DELETE /aliases/:id`
@@ -42,10 +50,11 @@ rather than mail vanishing.
 domain-suffix matcher. The Worker is therefore the fallback for *all*
 unmatched mail across `kitsos.net`, not just `hme.kitsos.net`.
 
-1. **Destination addresses** — every address you'll ever put in
-   `forward_to` must be added and verified in Email Routing first
-   (Cloudflare sends a confirmation email). Enforced by Cloudflare
-   itself, independent of `@kitsos/auth`'s resource-grant check.
+1. **Destination addresses** — after the user has verified an address in
+   Kitsos, the API requests Cloudflare Email Routing to send its separate
+   confirmation email. The user clicks that message and can then use the
+   address for aliases. A Cloudflare account is not needed; this confirmation
+   is enforced by Cloudflare itself, independent of the Kitsos resource grant.
 2. **Catch-all → Send to a Worker** → `hide-my-email`
 
 ## Known gaps
