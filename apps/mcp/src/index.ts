@@ -8,6 +8,7 @@ import {
 } from "@kitsos/auth";
 import { withTelemetry } from "@kitsos/telemetry";
 import { createMcpHandler } from "agents/mcp/server";
+import { trace } from "@opentelemetry/api";
 import { authHandler } from "./auth-handler";
 import type { Env, McpProps, ToolContext } from "./env";
 import {
@@ -252,6 +253,7 @@ export class McpApiHandler extends WorkerEntrypoint<Env, McpProps> {
     const context: ToolContext = {
       env: this.env,
       scopes,
+      telemetrySpan: trace.getActiveSpan(),
       delegation: {
         userId: props.userId,
         clientId: props.clientId,

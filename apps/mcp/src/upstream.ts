@@ -25,10 +25,10 @@ export async function callUpstream(
 ): Promise<UpstreamResult> {
   try {
     const result = await callUpstreamRequest(context, call);
-    recordToolSpan(toolName, call.service, result);
+    recordToolSpan(context.telemetrySpan, toolName, call.service, result);
     return result;
   } catch (error) {
-    recordToolSpan(toolName, call.service, {
+    recordToolSpan(context.telemetrySpan, toolName, call.service, {
       ok: false,
       status: 0,
       data: { error: "upstream-fetch-failed" },
@@ -38,6 +38,7 @@ export async function callUpstream(
 }
 
 function recordToolSpan(
+  requestSpan: import("@opentelemetry/api").Span | undefined,
   toolName: string,
   service: UpstreamName,
   result: UpstreamResult,
@@ -48,12 +49,11 @@ function recordToolSpan(
     && typeof (result.data as { error?: unknown }).error === "string"
     ? (result.data as { error: string }).error
     : undefined;
-  const span = trace.getTracer("kitsos.mcp.tools").startSpan(`mcp.tool ${toolName}`, {
-    attributes: {
-      "kitsos.mcp.tool.name": toolName,
-      "kitsos.mcp.upstream.service": service.toLowerCase(),
-      "http.upstream.status_code": result.status,
-    },
+  const span = requestSpan ?? trace.getTracer("kitsos.mcp.tools").startSpan(`mcp.tool ${toolName}`);
+  span.setAttributes({
+    "kitsos.mcp.tool.name": toolName,
+    "kitsos.mcp.upstream.service": service.toLowerCase(),
+    "http.upstream.status_code": result.status,
   });
   span.addEvent("mcp.tool.call", {
     "event.category": "mcp",
@@ -64,7 +64,7 @@ function recordToolSpan(
     ...(errorCode ? { "event.reason": errorCode } : {}),
   });
   if (!result.ok) span.setStatus({ code: SpanStatusCode.ERROR });
-  span.end();
+  if (!requestSpan) span.end();
 }
 
 async function callUpstreamRequest(

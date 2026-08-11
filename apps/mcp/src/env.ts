@@ -1,6 +1,7 @@
 import type { McpDelegation } from "@kitsos/auth";
 import type { TelemetryEnv } from "@kitsos/telemetry";
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
+import type { Span } from "@opentelemetry/api";
 
 export interface Env extends TelemetryEnv {
   DB: D1Database;
@@ -28,4 +29,5 @@ export interface ToolContext {
   env: Env;
   delegation: McpDelegation;
   scopes: Set<string>;
+  telemetrySpan?: Span;
 }
