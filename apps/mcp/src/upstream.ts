@@ -1,5 +1,4 @@
 import { mcpDelegationHeaders } from "@kitsos/auth";
-import { recordError, recordEvent } from "@kitsos/telemetry";
 import { SpanStatusCode, trace } from "@opentelemetry/api";
 import type { ToolContext } from "./env";
 
@@ -24,32 +23,52 @@ export async function callUpstream(
   toolName: string,
   call: UpstreamCall,
 ): Promise<UpstreamResult> {
-  return trace.getTracer("kitsos.mcp.tools").startActiveSpan(
-    `mcp.tool ${toolName}`,
-    async (span) => {
-      span.setAttributes({
-        "kitsos.mcp.tool.name": toolName,
-        "kitsos.mcp.upstream.service": call.service.toLowerCase(),
-      });
-      try {
-        const result = await callUpstreamOnActiveSpan(context, toolName, call);
-        span.setAttribute("http.upstream.status_code", result.status);
-        if (!result.ok) span.setStatus({ code: SpanStatusCode.ERROR });
-        return result;
-      } catch (error) {
-        span.setAttribute("error.code", "upstream-fetch-failed");
-        span.setStatus({ code: SpanStatusCode.ERROR });
-        throw error;
-      } finally {
-        span.end();
-      }
-    },
-  );
+  try {
+    const result = await callUpstreamRequest(context, call);
+    recordToolSpan(toolName, call.service, result);
+    return result;
+  } catch (error) {
+    recordToolSpan(toolName, call.service, {
+      ok: false,
+      status: 0,
+      data: { error: "upstream-fetch-failed" },
+    });
+    throw error;
+  }
 }
 
-async function callUpstreamOnActiveSpan(
-  context: ToolContext,
+function recordToolSpan(
   toolName: string,
+  service: UpstreamName,
+  result: UpstreamResult,
+): void {
+  const errorCode = !result.ok
+    && typeof result.data === "object"
+    && result.data !== null
+    && typeof (result.data as { error?: unknown }).error === "string"
+    ? (result.data as { error: string }).error
+    : undefined;
+  const span = trace.getTracer("kitsos.mcp.tools").startSpan(`mcp.tool ${toolName}`, {
+    attributes: {
+      "kitsos.mcp.tool.name": toolName,
+      "kitsos.mcp.upstream.service": service.toLowerCase(),
+      "http.upstream.status_code": result.status,
+    },
+  });
+  span.addEvent("mcp.tool.call", {
+    "event.category": "mcp",
+    "event.outcome": result.ok ? "success" : "error",
+    "kitsos.mcp.tool.name": toolName,
+    "kitsos.mcp.upstream.service": service.toLowerCase(),
+    "http.upstream.status_code": result.status,
+    ...(errorCode ? { "event.reason": errorCode } : {}),
+  });
+  if (!result.ok) span.setStatus({ code: SpanStatusCode.ERROR });
+  span.end();
+}
+
+async function callUpstreamRequest(
+  context: ToolContext,
   call: UpstreamCall,
 ): Promise<UpstreamResult> {
   const url = new URL(call.path, `https://${call.service.toLowerCase()}.internal`);
@@ -71,18 +90,9 @@ async function callUpstreamOnActiveSpan(
   try {
     response = await context.env[call.service].fetch(new Request(url, init));
   } catch {
-    recordError("mcp.tool.call", "upstream-fetch-failed", "MCP upstream request failed", {
-      "kitsos.mcp.tool.name": toolName,
-      "kitsos.mcp.upstream.service": call.service.toLowerCase(),
-    });
     throw new Error("MCP upstream request failed");
   }
   if (response.status === 204) {
-    recordEvent("mcp.tool.call", "success", {
-      "kitsos.mcp.tool.name": toolName,
-      "kitsos.mcp.upstream.service": call.service.toLowerCase(),
-      "http.upstream.status_code": 204,
-    });
     return { ok: true, status: 204, data: { success: true } };
   }
   const text = await response.text();
@@ -94,18 +104,6 @@ async function callUpstreamOnActiveSpan(
       data = { error: "invalid-upstream-json" };
     }
   }
-  const errorCode = !response.ok
-    && typeof data === "object"
-    && data !== null
-    && typeof (data as { error?: unknown }).error === "string"
-    ? (data as { error: string }).error
-    : undefined;
-  recordEvent("mcp.tool.call", response.ok ? "success" : "error", {
-    "kitsos.mcp.tool.name": toolName,
-    "kitsos.mcp.upstream.service": call.service.toLowerCase(),
-    "http.upstream.status_code": response.status,
-    "error.code": errorCode,
-  });
   return { ok: response.ok, status: response.status, data };
 }
 
