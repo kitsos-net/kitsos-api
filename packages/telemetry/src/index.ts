@@ -117,6 +117,9 @@ function sanitizeSpans(spans: Parameters<OTLPExporter["export"]>[0]) {
       "http.request.header.cookie",
       "http.response.header.set-cookie",
       "user_agent.original",
+      "db.statement",
+      "db.query.text",
+      "db.cf.kv.key",
       // Duplicates of the standard request fields.
       "kitsos.api.name",
       "kitsos.app.id",

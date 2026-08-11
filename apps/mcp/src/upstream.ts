@@ -1,5 +1,6 @@
 import { mcpDelegationHeaders } from "@kitsos/auth";
 import { recordError, recordEvent } from "@kitsos/telemetry";
+import { SpanStatusCode, trace } from "@opentelemetry/api";
 import type { ToolContext } from "./env";
 
 export type UpstreamName = "MAIL" | "HIDE_MY_EMAIL" | "UTILITY" | "VERIFY" | "KEYS_API";
@@ -19,6 +20,34 @@ export interface UpstreamResult {
 }
 
 export async function callUpstream(
+  context: ToolContext,
+  toolName: string,
+  call: UpstreamCall,
+): Promise<UpstreamResult> {
+  return trace.getTracer("kitsos.mcp.tools").startActiveSpan(
+    `mcp.tool ${toolName}`,
+    async (span) => {
+      span.setAttributes({
+        "kitsos.mcp.tool.name": toolName,
+        "kitsos.mcp.upstream.service": call.service.toLowerCase(),
+      });
+      try {
+        const result = await callUpstreamOnActiveSpan(context, toolName, call);
+        span.setAttribute("http.upstream.status_code", result.status);
+        if (!result.ok) span.setStatus({ code: SpanStatusCode.ERROR });
+        return result;
+      } catch (error) {
+        span.setAttribute("error.code", "upstream-fetch-failed");
+        span.setStatus({ code: SpanStatusCode.ERROR });
+        throw error;
+      } finally {
+        span.end();
+      }
+    },
+  );
+}
+
+async function callUpstreamOnActiveSpan(
   context: ToolContext,
   toolName: string,
   call: UpstreamCall,
