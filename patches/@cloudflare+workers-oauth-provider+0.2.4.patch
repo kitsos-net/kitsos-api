@@ -1,0 +1,93 @@
+diff --git a/node_modules/@cloudflare/workers-oauth-provider/dist/oauth-provider.js b/node_modules/@cloudflare/workers-oauth-provider/dist/oauth-provider.js
+index 7fac373..5579a0b 100644
+--- a/node_modules/@cloudflare/workers-oauth-provider/dist/oauth-provider.js
++++ b/node_modules/@cloudflare/workers-oauth-provider/dist/oauth-provider.js
+@@ -273,7 +273,10 @@ var OAuthProviderImpl = class OAuthProviderImpl {
+ 		if (!clientId) return this.createErrorResponse("invalid_client", "Client ID is required", 401);
+ 		const clientInfo = await this.getClient(env, clientId);
+ 		if (!clientInfo) return this.createErrorResponse("invalid_client", "Client not found", 401);
+-		if (!(clientInfo.tokenEndpointAuthMethod === "none")) {
++		if (clientInfo.tokenEndpointAuthMethod === "private_key_jwt") {
++			const authenticated = await this.validatePrivateKeyJwtAssertion(body, clientInfo, request, env);
++			if (!authenticated) return this.createErrorResponse("invalid_client", "Client authentication failed", 401);
++		} else if (!(clientInfo.tokenEndpointAuthMethod === "none")) {
+ 			if (!clientSecret) return this.createErrorResponse("invalid_client", "Client authentication failed: missing client_secret", 401);
+ 			if (!clientInfo.clientSecret) return this.createErrorResponse("invalid_client", "Client authentication failed: client has no registered secret", 401);
+ 			if (await hashSecret(clientSecret) !== clientInfo.clientSecret) return this.createErrorResponse("invalid_client", "Client authentication failed: invalid client_secret", 401);
+@@ -285,6 +288,48 @@ var OAuthProviderImpl = class OAuthProviderImpl {
+ 		};
+ 	}
+ 	/**
++	* Validates RFC 7523 private_key_jwt client authentication for CIMD clients.
++	* The key set is declared by the client metadata document, which is already
++	* fetched with Cloudflare's strictly-public routing enabled by the provider.
++	*/
++	async validatePrivateKeyJwtAssertion(body, clientInfo, request, env) {
++		if (body.client_assertion_type !== "urn:ietf:params:oauth:client-assertion-type:jwt-bearer" || typeof body.client_assertion !== "string" || body.client_assertion.length > 8192 || !clientInfo.jwksUri) return false;
++		const parts = body.client_assertion.split(".");
++		if (parts.length !== 3 || parts.some((part) => !/^[A-Za-z0-9_-]+$/.test(part))) return false;
++		let header;
++		let claims;
++		try {
++			header = JSON.parse(new TextDecoder().decode(base64UrlToArrayBuffer(parts[0])));
++			claims = JSON.parse(new TextDecoder().decode(base64UrlToArrayBuffer(parts[1])));
++		} catch {
++			return false;
++		}
++		if (!header || typeof header !== "object" || header.alg !== "RS256" || typeof header.kid !== "string" || !claims || typeof claims !== "object") return false;
++		const now = Math.floor(Date.now() / 1e3);
++		if (claims.iss !== clientInfo.clientId || claims.sub !== clientInfo.clientId || !isExpectedAudience(claims.aud, request.url) || !Number.isSafeInteger(claims.exp) || !Number.isSafeInteger(claims.iat) || claims.exp < now - 30 || claims.iat > now + 30 || claims.exp - claims.iat > 300 || typeof claims.jti !== "string" || !/^[A-Za-z0-9._-]{8,512}$/.test(claims.jti)) return false;
++		let jwks;
++		try {
++			const response = await fetch(clientInfo.jwksUri, { headers: { Accept: "application/json" }, cf: { cacheTtl: 300, cacheEverything: true } });
++			if (!response.ok) return false;
++			jwks = await response.json();
++		} catch {
++			return false;
++		}
++		const jwk = Array.isArray(jwks?.keys) ? jwks.keys.find((key) => key && key.kid === header.kid && key.kty === "RSA" && key.use !== "enc") : undefined;
++		if (!jwk) return false;
++		try {
++			const key = await crypto.subtle.importKey("jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
++			const verified = await crypto.subtle.verify({ name: "RSASSA-PKCS1-v1_5" }, key, base64UrlToArrayBuffer(parts[2]), new TextEncoder().encode(`${parts[0]}.${parts[1]}`));
++			if (!verified) return false;
++		} catch {
++			return false;
++		}
++		const replayKey = `client-assertion:${await generateTokenId(`${clientInfo.clientId}:${claims.jti}`)}`;
++		if (await env.OAUTH_KV.get(replayKey)) return false;
++		await env.OAUTH_KV.put(replayKey, "1", { expirationTtl: Math.max(1, Math.min(300, claims.exp - now + 30)) });
++		return true;
++	}
++	/**
+ 	* Checks if a URL matches a specific API route
+ 	* @param url - The URL to check
+ 	* @param route - The API route to check against
+@@ -370,8 +415,10 @@ var OAuthProviderImpl = class OAuthProviderImpl {
+ 			token_endpoint_auth_methods_supported: [
+ 				"client_secret_basic",
+ 				"client_secret_post",
+-				"none"
++				"none",
++				"private_key_jwt"
+ 			],
++			token_endpoint_auth_signing_alg_values_supported: ["RS256"],
+ 			revocation_endpoint: tokenEndpoint,
+ 			code_challenge_methods_supported: this.options.allowPlainPKCE !== false ? ["plain", "S256"] : ["S256"],
+ 			client_id_metadata_document_supported: this.hasGlobalFetchStrictlyPublic()
+@@ -1429,6 +1476,15 @@ function base64ToArrayBuffer(base64) {
+ 	for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+ 	return bytes.buffer;
+ }
++/** Decodes an unpadded base64url value without accepting non-url-safe input. */
++function base64UrlToArrayBuffer(value) {
++	const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - value.length % 4) % 4);
++	return base64ToArrayBuffer(padded);
++}
++/** RFC 7523 permits a string or an array containing the exact token endpoint. */
++function isExpectedAudience(value, tokenEndpoint) {
++	return (typeof value === "string" ? [value] : Array.isArray(value) ? value : []).includes(tokenEndpoint);
++}
+ /**
+ * Encrypts props data with a newly generated key
+ * @param data - The data to encrypt
