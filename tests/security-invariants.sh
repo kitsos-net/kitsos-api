@@ -146,6 +146,8 @@ sqlite3 "$global_db" \
   -cmd "PRAGMA foreign_keys = ON" \
   ".read packages/auth/0016_global_verified_resources.sql"
 
+sqlite3 "$global_db" ".read packages/auth/0017_verify_template_canonical_url.sql"
+
 sqlite3 "$global_db" "
   PRAGMA foreign_keys = ON;
   CREATE TEMP TABLE global_assertions (ok INTEGER NOT NULL CHECK (ok = 1));
@@ -169,6 +171,28 @@ sqlite3 "$global_db" "
   WHERE rv.user_id = 'global-owner'
     AND r.resource_type = 'email_address'
     AND r.value = 'global@example.com';
+  INSERT INTO global_assertions
+  SELECT COUNT(*) = 1
+  FROM mail_templates
+  WHERE id = 'resource-verification'
+    AND url = 'https://cdn.kitsos.net/api/mail/templates/verify-email-dev';
 "
 
 echo "global resource migration passed"
+
+grep -q 'redirect: "manual"' apps/mail/src/template.ts
+if grep -Eq '^[[:space:]]*redirect: "error"' apps/mail/src/template.ts; then
+  echo "workerd-incompatible redirect mode returned" >&2
+  exit 1
+fi
+
+test "$(grep -c 'callUpstream(context, "kitsos_' apps/mcp/src/tools.ts)" -eq 28
+grep -q 'headers.set("X-Kitsos-MCP-Tool"' apps/mcp/src/upstream.ts
+grep -q 'span?.addEvent("mcp.tool.call"' packages/telemetry/src/index.ts
+grep -q '"db.statement"' packages/telemetry/src/index.ts
+grep -q '"db.cf.kv.key"' packages/telemetry/src/index.ts
+grep -q 'recordAuthDecision' packages/auth/src/index.ts
+grep -q 'recordResourceDecision' packages/auth/src/checks.ts
+grep -q 'recordUsageDecision' packages/auth/src/checks.ts
+
+echo "telemetry invariants passed"

@@ -8,7 +8,7 @@ import {
   getEffectiveLimit,
   sha256Hex,
 } from "@kitsos/auth";
-import { withTelemetry } from "@kitsos/telemetry";
+import { recordError, recordEvent, withTelemetry } from "@kitsos/telemetry";
 import { requireUser, requireAdmin } from "./middleware";
 import { lookupTxtRecords, verificationRecordName, generateVerificationToken } from "./dns";
 import { sendMagicLinkEmail } from "./mail";
@@ -303,6 +303,10 @@ resources.delete("/:resourceId", async (c) => {
     }
     throw error;
   }
+  recordEvent("verify.resource.delete", "success", {
+    "kitsos.resource.id": resourceId,
+    "kitsos.user.id": userId,
+  });
   return c.body(null, 204);
 });
 
@@ -429,10 +433,25 @@ resources.post("/", async (c) => {
       )
       .run();
   } catch {
+    recordError(
+      "verify.resource.create",
+      "database-error",
+      "Could not create verification record",
+      {
+        "kitsos.verification.id": verificationId,
+        "kitsos.user.id": userId,
+      },
+    );
     return c.json({ error: "database-error" }, 500);
   }
 
   if (method === "dns_txt") {
+    recordEvent("verify.resource.create", "success", {
+      "kitsos.resource.id": resourceId,
+      "kitsos.verification.id": verificationId,
+      "kitsos.user.id": userId,
+      "kitsos.verification.method": method,
+    });
     return c.json({
       resourceId,
       verificationId,
@@ -466,8 +485,25 @@ resources.post("/", async (c) => {
            )`
       ).bind(resourceId, resourceId, resourceId, resourceId),
     ]);
+    recordError(
+      "verify.resource.create",
+      "verification-email-send-failed",
+      "Could not send verification email",
+      {
+        "kitsos.resource.id": resourceId,
+        "kitsos.verification.id": verificationId,
+        "kitsos.user.id": userId,
+        "kitsos.verification.method": method,
+      },
+    );
     return c.json({ error: "verification-email-failed" }, 502);
   }
+  recordEvent("verify.resource.create", "success", {
+    "kitsos.resource.id": resourceId,
+    "kitsos.verification.id": verificationId,
+    "kitsos.user.id": userId,
+    "kitsos.verification.method": method,
+  });
   return c.json({ resourceId, verificationId, emailSent: true }, 201);
 });
 
@@ -487,11 +523,24 @@ resources.post("/:resourceId/check-dns", async (c) => {
     .bind(resourceId, userId)
     .first<{ id: string; token_hash: string; value: string }>();
 
-  if (!verification) return c.json({ error: "no-pending-verification" }, 404);
+  if (!verification) {
+    recordEvent("verify.domain.check", "denied", {
+      "error.code": "no-pending-verification",
+      "kitsos.resource.id": resourceId,
+      "kitsos.user.id": userId,
+    });
+    return c.json({ error: "no-pending-verification" }, 404);
+  }
 
   const records = await lookupTxtRecords(verificationRecordName(verification.value));
   const recordHashes = await Promise.all(records.map(sha256Hex));
   if (!recordHashes.includes(verification.token_hash)) {
+    recordEvent("verify.domain.check", "denied", {
+      "error.code": "dns-record-not-found",
+      "kitsos.resource.id": resourceId,
+      "kitsos.verification.id": verification.id,
+      "kitsos.user.id": userId,
+    });
     return c.json({ verified: false }, 200);
   }
 
@@ -519,6 +568,11 @@ resources.post("/:resourceId/check-dns", async (c) => {
     return c.json({ error: "verified-resource-limit-exceeded" }, 429);
   }
 
+  recordEvent("verify.domain.check", "success", {
+    "kitsos.resource.id": resourceId,
+    "kitsos.verification.id": verification.id,
+    "kitsos.user.id": userId,
+  });
   return c.json({ verified: true });
 });
 
@@ -528,8 +582,20 @@ resources.get("/:resourceId/confirm", async (c) => {
   c.header("Referrer-Policy", "no-referrer");
   const resourceId = c.req.param("resourceId");
   const token = c.req.query("token");
-  if (!token) return c.json({ error: "missing-token" }, 400);
-  if (token.length > 128) return c.json({ error: "invalid-token" }, 400);
+  if (!token) {
+    recordEvent("verify.email.confirm", "denied", {
+      "error.code": "missing-token",
+      "kitsos.resource.id": resourceId,
+    });
+    return c.json({ error: "missing-token" }, 400);
+  }
+  if (token.length > 128) {
+    recordEvent("verify.email.confirm", "denied", {
+      "error.code": "invalid-token",
+      "kitsos.resource.id": resourceId,
+    });
+    return c.json({ error: "invalid-token" }, 400);
+  }
   const tokenHash = await sha256Hex(token);
 
   const verification = await c.env.DB.prepare(
@@ -540,7 +606,13 @@ resources.get("/:resourceId/confirm", async (c) => {
     .bind(resourceId, tokenHash)
     .first<{ id: string; user_id: string }>();
 
-  if (!verification) return c.json({ error: "invalid-or-expired-token" }, 404);
+  if (!verification) {
+    recordEvent("verify.email.confirm", "denied", {
+      "error.code": "invalid-or-expired-token",
+      "kitsos.resource.id": resourceId,
+    });
+    return c.json({ error: "invalid-or-expired-token" }, 404);
+  }
 
   const update = await c.env.DB.prepare(
     `UPDATE resource_verifications
@@ -570,6 +642,11 @@ resources.get("/:resourceId/confirm", async (c) => {
     return c.json({ error: "verified-resource-limit-exceeded" }, 429);
   }
 
+  recordEvent("verify.email.confirm", "success", {
+    "kitsos.resource.id": resourceId,
+    "kitsos.verification.id": verification.id,
+    "kitsos.user.id": verification.user_id,
+  });
   return c.json({ verified: true });
 });
 
@@ -614,6 +691,10 @@ admin.delete("/resources/:resourceId", async (c) => {
     }
     throw error;
   }
+  recordEvent("verify.resource.admin_delete", "success", {
+    "kitsos.resource.id": resourceId,
+    "kitsos.user.id": c.get("userId"),
+  });
   return c.body(null, 204);
 });
 

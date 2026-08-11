@@ -5,6 +5,7 @@ import type {
   RateLimitOptions,
   UsageLimitOptions,
 } from "./types";
+import { recordResourceDecision, recordUsageDecision } from "./telemetry";
 
 const AUTH_CACHE_TTL_SECONDS = 60;
 
@@ -331,7 +332,7 @@ export async function checkResourceGrant(
   value: string
 ): Promise<CheckResult> {
   const grant = await env.DB.prepare(
-    `SELECT rv.grace_expires_at
+    `SELECT r.id, rv.grace_expires_at
      FROM resources r
      JOIN resource_grants rg ON rg.resource_id = r.id
      JOIN resource_verifications rv ON rv.id = rg.verification_id
@@ -344,15 +345,26 @@ export async function checkResourceGrant(
      LIMIT 1`
   )
     .bind(resourceType, value, context.userId)
-    .first<{ grace_expires_at: number | null }>();
+    .first<{ id: string; grace_expires_at: number | null }>();
 
-  if (!grant) return { allowed: false, status: 403, reason: "resource-not-granted" };
+  if (!grant) {
+    recordResourceDecision(context, resourceType, undefined, "denied", "resource-not-granted");
+    return { allowed: false, status: 403, reason: "resource-not-granted" };
+  }
 
   const now = Date.now() / 1000;
   if (grant.grace_expires_at && grant.grace_expires_at < now) {
+    recordResourceDecision(
+      context,
+      resourceType,
+      grant.id,
+      "denied",
+      "resource-verification-expired",
+    );
     return { allowed: false, status: 403, reason: "resource-verification-expired" };
   }
 
+  recordResourceDecision(context, resourceType, grant.id, "allowed");
   return { allowed: true, status: 200 };
 }
 
@@ -430,6 +442,16 @@ export async function checkUsageLimit(
 
   if (!limitRow) {
     // No configured limit = no enforcement for this limit_type
+    recordUsageDecision(
+      context.userId,
+      context.appId,
+      options.limitType,
+      "noop",
+      undefined,
+      options.cost ?? 1,
+      undefined,
+      "limit-not-configured",
+    );
     return { allowed: true, status: 200 };
   }
 
@@ -439,6 +461,16 @@ export async function checkUsageLimit(
     || cost < 1
     || !/^[a-z][a-z0-9_]{0,63}$/.test(options.limitType)
   ) {
+    recordUsageDecision(
+      context.userId,
+      context.appId,
+      options.limitType,
+      "error",
+      undefined,
+      cost,
+      limitRow.limit_value,
+      "invalid-usage-limit-cost",
+    );
     return { allowed: false, status: 429, reason: "invalid-usage-limit-cost" };
   }
   const dayBucket = Math.floor(Date.now() / 1000 / 86400);
@@ -462,10 +494,37 @@ export async function checkUsageLimit(
       limitRow.limit_value,
       limitRow.limit_value
     )
-    .first();
-  return consumed
-    ? { allowed: true, status: 200 }
-    : { allowed: false, status: 429, reason: "usage-limit-exceeded" };
+    .first<{ count: number }>();
+  if (consumed) {
+    recordUsageDecision(
+      context.userId,
+      context.appId,
+      options.limitType,
+      "allowed",
+      consumed.count - cost,
+      cost,
+      limitRow.limit_value,
+    );
+    return { allowed: true, status: 200 };
+  }
+
+  const current = await env.DB.prepare(
+    `SELECT count FROM daily_usage_counters
+     WHERE user_id = ? AND app_id = ? AND limit_type = ? AND day_bucket = ?`,
+  )
+    .bind(context.userId, context.appId, options.limitType, dayBucket)
+    .first<{ count: number }>();
+  recordUsageDecision(
+    context.userId,
+    context.appId,
+    options.limitType,
+    "denied",
+    current?.count ?? 0,
+    cost,
+    limitRow.limit_value,
+    "usage-limit-exceeded",
+  );
+  return { allowed: false, status: 429, reason: "usage-limit-exceeded" };
 }
 
 export async function writeAuditLog(

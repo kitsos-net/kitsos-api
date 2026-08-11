@@ -170,7 +170,154 @@ app.get("/geo/help", async (c) => {
 });
 
 type DnsAnswer = { name: string; type: number; TTL: number; data: string };
+type DnsQuestion = { name: string; type: number };
+
+function dnsWireQuery(name: string, type: string): Uint8Array {
+  const labels = name.split(".").map((label) => new TextEncoder().encode(label));
+  const length = 12 + labels.reduce((total, label) => total + 1 + label.length, 0) + 1 + 4;
+  const packet = new Uint8Array(length);
+  const view = new DataView(packet.buffer);
+  view.setUint16(0, crypto.getRandomValues(new Uint16Array(1))[0]);
+  view.setUint16(2, 0x0100); // recursion desired
+  view.setUint16(4, 1); // one question
+  let offset = 12;
+  for (const label of labels) {
+    packet[offset] = label.length;
+    packet.set(label, offset + 1);
+    offset += label.length + 1;
+  }
+  packet[offset] = 0;
+  view.setUint16(offset + 1, DNS_TYPES[type]);
+  view.setUint16(offset + 3, 1); // IN
+  return packet;
+}
+
+function dnsName(packet: Uint8Array, start: number): { value: string; next: number } {
+  const labels: string[] = [];
+  const visited = new Set<number>();
+  let offset = start;
+  let next = start;
+  let jumped = false;
+  for (let part = 0; part < 128; part++) {
+    if (offset >= packet.length || visited.has(offset)) throw new Error("Invalid DNS response");
+    visited.add(offset);
+    const length = packet[offset];
+    if ((length & 0xc0) === 0xc0) {
+      if (offset + 1 >= packet.length) throw new Error("Invalid DNS response");
+      const pointer = ((length & 0x3f) << 8) | packet[offset + 1];
+      if (!jumped) next = offset + 2;
+      offset = pointer;
+      jumped = true;
+      continue;
+    }
+    if ((length & 0xc0) !== 0 || offset + 1 + length > packet.length) {
+      throw new Error("Invalid DNS response");
+    }
+    if (length === 0) {
+      if (!jumped) next = offset + 1;
+      return { value: labels.join("."), next };
+    }
+    labels.push(new TextDecoder().decode(packet.subarray(offset + 1, offset + 1 + length)));
+    offset += length + 1;
+    if (!jumped) next = offset;
+  }
+  throw new Error("Invalid DNS response");
+}
+
+function ipv6Text(bytes: Uint8Array): string {
+  if (bytes.length !== 16) throw new Error("Invalid DNS response");
+  const groups: string[] = [];
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let index = 0; index < 8; index++) groups.push(view.getUint16(index * 2).toString(16));
+  return groups.join(":");
+}
+
+function dnsRdata(packet: Uint8Array, type: number, offset: number, length: number): string {
+  const end = offset + length;
+  if (end > packet.length) throw new Error("Invalid DNS response");
+  if (type === DNS_TYPES.A && length === 4) return [...packet.subarray(offset, end)].join(".");
+  if (type === DNS_TYPES.AAAA) return ipv6Text(packet.subarray(offset, end));
+  if (type === DNS_TYPES.CNAME || type === DNS_TYPES.NS) return dnsName(packet, offset).value;
+  if (type === DNS_TYPES.TXT) {
+    const values: string[] = [];
+    let cursor = offset;
+    while (cursor < end) {
+      const partLength = packet[cursor++];
+      if (cursor + partLength > end) throw new Error("Invalid DNS response");
+      values.push(new TextDecoder().decode(packet.subarray(cursor, cursor + partLength)));
+      cursor += partLength;
+    }
+    return JSON.stringify(values.join(""));
+  }
+  if (type === DNS_TYPES.SOA) {
+    const primary = dnsName(packet, offset);
+    const responsible = dnsName(packet, primary.next);
+    if (responsible.next + 20 > end) throw new Error("Invalid DNS response");
+    const view = new DataView(packet.buffer, packet.byteOffset + responsible.next, 20);
+    return `${primary.value} ${responsible.value} ${view.getUint32(0)} ${view.getUint32(4)} ${view.getUint32(8)} ${view.getUint32(12)} ${view.getUint32(16)}`;
+  }
+  return [...packet.subarray(offset, end)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function parseDnsWire(packet: Uint8Array) {
+  if (packet.length < 12) throw new Error("Invalid DNS response");
+  const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
+  const questionCount = view.getUint16(4);
+  const sectionCounts = [view.getUint16(6), view.getUint16(8), view.getUint16(10)];
+  let offset = 12;
+  const questions: DnsQuestion[] = [];
+  for (let index = 0; index < questionCount; index++) {
+    const name = dnsName(packet, offset);
+    if (name.next + 4 > packet.length) throw new Error("Invalid DNS response");
+    questions.push({ name: name.value, type: view.getUint16(name.next) });
+    offset = name.next + 4;
+  }
+  const sections: DnsAnswer[][] = [[], [], []];
+  for (let section = 0; section < sectionCounts.length; section++) {
+    for (let index = 0; index < sectionCounts[section]; index++) {
+      const name = dnsName(packet, offset);
+      if (name.next + 10 > packet.length) throw new Error("Invalid DNS response");
+      const type = view.getUint16(name.next);
+      const ttl = view.getUint32(name.next + 4);
+      const length = view.getUint16(name.next + 8);
+      const rdataOffset = name.next + 10;
+      const data = dnsRdata(packet, type, rdataOffset, length);
+      if (data.length <= 4096 && sections[section].length < 100) {
+        sections[section].push({ name: name.value, type, TTL: ttl, data });
+      }
+      offset = rdataOffset + length;
+    }
+  }
+  return {
+    id: view.getUint16(0),
+    flags: view.getUint16(2),
+    questions,
+    answers: sections[0],
+    authorities: sections[1],
+    additionals: sections[2],
+  };
+}
+
+async function resolveQuad9(name: string, type: string) {
+  const query = dnsWireQuery(name, type);
+  const encoded = btoa(String.fromCharCode(...query))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+  const response = await fetch(`${DNS_PROVIDERS.quad9.url}?dns=${encoded}`, {
+    headers: { accept: "application/dns-message" },
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) throw new Error("DNS upstream failed");
+  const declaredLength = Number(response.headers.get("content-length") ?? 0);
+  if (declaredLength > 64 * 1024) throw new Error("DNS upstream response too large");
+  const packet = new Uint8Array(await response.arrayBuffer());
+  if (packet.byteLength > 64 * 1024) throw new Error("DNS upstream response too large");
+  return parseDnsWire(packet);
+}
+
 async function resolveDns(name: string, type: string, resolver: keyof typeof DNS_PROVIDERS) {
+  if (resolver === "quad9") return resolveQuad9(name, type);
   const provider = DNS_PROVIDERS[resolver];
   const response = await fetch(`${provider.url}?name=${encodeURIComponent(name)}&type=${type}`, {
     headers: { accept: "application/dns-json" },

@@ -1,72 +1,84 @@
-# API usage statistics in Axiom
+# Kitsos API logging in Axiom EU
 
-Every authenticated HTTP request produces one fully sampled OpenTelemetry
-server span in the dataset configured through `AXIOM_DATASET`. The span
-contains:
-
-Trace ingestion defaults to Axiom's EU Central edge endpoint
-`https://eu-central-1.aws.edge.axiom.co/v1/traces`. Set
-`AXIOM_TRACES_URL` only when the organization uses another Axiom edge or the
-legacy EU endpoint.
+Every HTTP request, including unauthenticated, rejected, rate-limited and
+not-found requests, produces one fully sampled OpenTelemetry server span in
+Axiom EU through `https://eu-central-1.aws.edge.axiom.co/v1/traces`. Request
+completion is represented by the root span; meaningful application and
+decision events are added to its `events` array. The dataset is configured
+through `AXIOM_DATASET` and should be `api-logs`. `AXIOM_TRACES_URL` is only
+needed when the organization deliberately uses a different Axiom edge.
 
 | Axiom field | Meaning |
 | --- | --- |
 | `service.name` | Kitsos API (`mail`, `verify`, `keys-api`, `utility`, …) |
+| `attributes.url.path` | Sanitized path without query string, UUIDs or tokens |
+| `attributes.custom["kitsos.telemetry.schema_version"]` | Telemetry contract version; currently `3` |
+| `attributes.custom["kitsos.request.outcome"]` | Final HTTP outcome such as `success`, `rate_limited`, or `server_error` |
+| `attributes.custom["kitsos.request.reason"]` | Stable final HTTP reason |
 | `attributes.custom["kitsos.user.id"]` | Internal Clerk user ID |
-| `attributes.custom["kitsos.auth.method"]` | `api_key`, `session`, or `mcp` |
+| `attributes.custom["kitsos.auth.method"]` | `anonymous`, `bearer`, `api_key`, `session`, or `mcp` |
+| `attributes.custom["kitsos.api_key.used"]` | Whether a Kitsos API key was presented |
 | `attributes.custom["kitsos.api_key.id"]` | Internal key ID, if used |
 | `attributes.custom["kitsos.request.scope"]` | Scope checked for the request |
-| `attributes.custom["kitsos.event.name"]` | Last semantic event on the request |
-| `attributes.custom["kitsos.event.outcome"]` | `success`, `allowed`, `denied`, `error`, or `noop` |
-| `attributes.custom["error.code"]` | Stable machine-readable failure reason |
+| `attributes.custom["cloudflare.ray_id"]` | Cloudflare Ray ID for support correlation |
+| `attributes.custom["cloudflare.colo"]` | Cloudflare data center |
+| `attributes.custom["client.country"]` | Country code supplied by Cloudflare |
+| `attributes.custom["client.asn"]` | ASN supplied by Cloudflare |
 | `attributes.http.response.status_code` | Final HTTP response status |
 | `attributes.http.request.method` | HTTP method |
-| `attributes.url.path` | Request path |
+| `duration` | End-to-end Worker duration |
+| `attributes.faas.coldstart` | Whether Cloudflare started a fresh isolate |
 
-Valid API-key requests contain `kitsos.api_key.id`. Invalid keys contain only
-a 16-character SHA-256 fingerprint so repeated attempts can be correlated.
-No email address, raw API key, full API-key hash, authorization header,
-confirmation token, webhook secret, or request body is added to telemetry.
+Anonymous and session requests have `kitsos.api_key.used = false`. Presented
+Kitsos keys have `kitsos.api_key.used = true`; valid keys additionally contain
+`kitsos.api_key.id`. Invalid keys contain only a 16-character SHA-256
+fingerprint in their `auth.decision` event so repeated attempts can be
+correlated. No email address, raw API key, full API-key hash, authorization
+header, confirmation token, webhook secret, request body, query string,
+cookie, or full URL is added to telemetry.
 Authenticated requests to the MCP endpoint use `service.name = "mcp"` and
 carry the same user and authentication dimensions as the other API workers.
 
 ## Semantic events
 
-Events are stored both in the span's `events` array and, for simple filtering,
-as the latest `kitsos.event.*` attributes. Current event names include:
+Events are stored only in the span's `events` array so their data is not
+duplicated on the root span. Current event names include:
 
-- `auth.decision`, `resource.authorization`, `usage.decision`
-- `hme.alias.create`, `hme.alias.update`, `hme.alias.delete`,
-  `hme.email.forward`
-- `mail.message.send`, `mail.verification.send`, `mail.webhook.deliver`,
+- `auth.decision`, `resource.authorization`, `usage.decision`,
+  `rate_limit.decision`
+- `hme.alias.create`, `hme.alias.update`, `hme.alias.delete`
+- `mail.message.send`, `mail.webhook.deliver`,
   and template/webhook create, update, and delete events
 - `verify.resource.create`, `verify.resource.delete`,
-  `verify.domain.check`, `verify.domain.recheck`, `verify.email.confirm`
+  `verify.domain.check`, `verify.email.confirm`
 - `keys.api_key.create`, `keys.api_key.revoke`,
   `keys.limit_request.create`, `keys.limit_request.approve`,
   `keys.limit_request.deny`
+- `mcp.tool.call`, with the exact name in `kitsos.mcp.tool.name`, the upstream
+  service and its HTTP status
 
 Event fields use internal user, key, resource, and verification IDs. Failure
-events have a stable `error.code` and a sanitized `error.message` where useful.
+events have a stable `event.reason` and a sanitized `error.message` where
+useful.
 
 ### Failures by event, user, and key
 
 ```apl
 ['YOUR_AXIOM_DATASET']
-| where ['kind'] == "server"
+| where ['attributes.custom']['kitsos.telemetry.schema_version'] == 3
+| mv-expand events
 | extend
-    event_name = tostring(['attributes.custom']['kitsos.event.name']),
-    outcome = tostring(['attributes.custom']['kitsos.event.outcome']),
-    error_code = tostring(['attributes.custom']['error.code']),
-    user_id = tostring(['attributes.custom']['kitsos.user.id']),
-    api_key_id = tostring(['attributes.custom']['kitsos.api_key.id'])
-| where outcome == "denied" or outcome == "error"
-| summarize failures = count() by event_name, error_code, user_id, api_key_id
+    event_name = tostring(events.name),
+    outcome = tostring(events.attributes['event.outcome']),
+    reason = tostring(events.attributes['event.reason']),
+    user_id = tostring(events.attributes['kitsos.user.id']),
+    api_key_id = tostring(events.attributes['kitsos.api_key.id'])
+| where outcome in ("denied", "rate_limited", "error")
+| summarize failures = count() by event_name, reason, user_id, api_key_id
 | sort by failures desc
 ```
 
-Replace `YOUR_AXIOM_DATASET` in the queries below with the value of
-`AXIOM_DATASET`.
+Replace `YOUR_AXIOM_DATASET` in the queries below with `api-logs`.
 
 ## Requests, successes, and errors per user and API
 
@@ -141,11 +153,14 @@ For a dashboard table, format `success_rate` as a percentage.
 
 ## Axiom dashboard
 
-The shared Axiom dashboard **API Usage by User** has the stable UID
-`api-usage-by-user`. It contains headline request, success, error, and active
-user statistics; API and outcome trends; and per-user/API and endpoint tables.
-Axiom's existing OpenTelemetry Traces dashboard remains useful for opening the
-underlying traces.
+The shared Axiom dashboards are:
+
+- **API Logs & Diagnostics**, stable UID `api-logs-diagnostics`, for request
+  health, errors, latency, sources, structured events and privacy checks.
+- **API Security & Limit Logs**, stable UID `api-security-limit-logs`, for
+  authentication, authorization, user/key IDs, rate limits and usage limits.
+
+Product and inventory statistics belong in Grafana.
 
 The counts are not sampled: telemetry explicitly uses a `1.0` head-sampling
 ratio. As with any external telemetry system, requests can only be counted

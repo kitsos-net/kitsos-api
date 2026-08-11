@@ -19,6 +19,7 @@ export interface UpstreamResult {
 
 export async function callUpstream(
   context: ToolContext,
+  toolName: string,
   call: UpstreamCall,
 ): Promise<UpstreamResult> {
   const url = new URL(call.path, `https://${call.service.toLowerCase()}.internal`);
@@ -26,6 +27,7 @@ export async function callUpstream(
     if (value !== undefined) url.searchParams.set(name, String(value));
   }
   const headers = mcpDelegationHeaders(context.delegation);
+  headers.set("X-Kitsos-MCP-Tool", toolName);
   headers.set("Accept", "application/json, text/plain;q=0.9");
   const init: RequestInit = {
     method: call.method ?? "GET",
@@ -36,7 +38,12 @@ export async function callUpstream(
     init.body = JSON.stringify(call.body);
   }
 
-  const response = await context.env[call.service].fetch(new Request(url, init));
+  let response: Response;
+  try {
+    response = await context.env[call.service].fetch(new Request(url, init));
+  } catch {
+    throw new Error("MCP upstream request failed");
+  }
   if (response.status === 204) {
     return { ok: true, status: 204, data: { success: true } };
   }

@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { recordUsageDecision } from "./telemetry";
 
 export const LIMIT_DEFINITIONS = {
   emails_per_day: {
@@ -124,7 +125,25 @@ export async function consumeDailyLimit(
       limit
     )
     .first<{ count: number }>();
-  const count = row?.count ?? limit;
+  let count = row?.count;
+  if (count === undefined) {
+    count = (await env.DB.prepare(
+      `SELECT count FROM daily_usage_counters
+       WHERE user_id = ? AND app_id = ? AND limit_type = ? AND day_bucket = ?`,
+    )
+      .bind(userId, definition.appId, limitType, dayBucket)
+      .first<{ count: number }>())?.count ?? 0;
+  }
+  recordUsageDecision(
+    userId,
+    definition.appId,
+    limitType,
+    row ? "allowed" : "denied",
+    row ? count - cost : count,
+    cost,
+    limit,
+    row ? undefined : "usage-limit-exceeded",
+  );
   return {
     allowed: Boolean(row),
     limit,
@@ -158,5 +177,24 @@ export async function consumeHardDailyLimit(
   )
     .bind(userId, appId, limitType, dayBucket, hardLimit)
     .first<{ count: number }>();
+  let current = row?.count;
+  if (current === undefined) {
+    current = (await env.DB.prepare(
+      `SELECT count FROM daily_usage_counters
+       WHERE user_id = ? AND app_id = ? AND limit_type = ? AND day_bucket = ?`,
+    )
+      .bind(userId, appId, limitType, dayBucket)
+      .first<{ count: number }>())?.count ?? 0;
+  }
+  recordUsageDecision(
+    userId,
+    appId,
+    limitType,
+    row ? "allowed" : "denied",
+    row ? current - 1 : current,
+    1,
+    hardLimit,
+    row ? undefined : "hard-usage-limit-exceeded",
+  );
   return Boolean(row);
 }
