@@ -1,5 +1,4 @@
 import { mcpDelegationHeaders } from "@kitsos/auth";
-import { SpanStatusCode, trace } from "@opentelemetry/api";
 import type { ToolContext } from "./env";
 
 export type UpstreamName = "MAIL" | "HIDE_MY_EMAIL" | "UTILITY" | "VERIFY" | "KEYS_API";
@@ -25,10 +24,10 @@ export async function callUpstream(
 ): Promise<UpstreamResult> {
   try {
     const result = await callUpstreamRequest(context, call);
-    recordToolSpan(context.telemetrySpan, toolName, call.service, result);
+    recordToolResult(context, toolName, call.service, result);
     return result;
   } catch (error) {
-    recordToolSpan(context.telemetrySpan, toolName, call.service, {
+    recordToolResult(context, toolName, call.service, {
       ok: false,
       status: 0,
       data: { error: "upstream-fetch-failed" },
@@ -37,8 +36,8 @@ export async function callUpstream(
   }
 }
 
-function recordToolSpan(
-  requestSpan: import("@opentelemetry/api").Span | undefined,
+function recordToolResult(
+  context: ToolContext,
   toolName: string,
   service: UpstreamName,
   result: UpstreamResult,
@@ -49,22 +48,11 @@ function recordToolSpan(
     && typeof (result.data as { error?: unknown }).error === "string"
     ? (result.data as { error: string }).error
     : undefined;
-  const span = requestSpan ?? trace.getTracer("kitsos.mcp.tools").startSpan(`mcp.tool ${toolName}`);
-  span.setAttributes({
-    "kitsos.mcp.tool.name": toolName,
-    "kitsos.mcp.upstream.service": service.toLowerCase(),
-    "http.upstream.status_code": result.status,
-  });
-  span.addEvent("mcp.tool.call", {
-    "event.category": "mcp",
-    "event.outcome": result.ok ? "success" : "error",
-    "kitsos.mcp.tool.name": toolName,
-    "kitsos.mcp.upstream.service": service.toLowerCase(),
-    "http.upstream.status_code": result.status,
-    ...(errorCode ? { "event.reason": errorCode } : {}),
-  });
-  if (!result.ok) span.setStatus({ code: SpanStatusCode.ERROR });
-  if (!requestSpan) span.end();
+  context.telemetry.toolName = toolName;
+  context.telemetry.upstreamService = service.toLowerCase();
+  context.telemetry.upstreamStatus = result.status;
+  context.telemetry.outcome = result.ok ? "success" : "error";
+  context.telemetry.reason = errorCode;
 }
 
 async function callUpstreamRequest(
