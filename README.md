@@ -16,7 +16,8 @@ criteria for introducing `/v2`.
 
 ## Infra
 
-- D1: `kitsos-api` (`c5ccab68-5f60-4b28-8ce9-20c57b8622ea`)
+- D1: `kitsos-api-eu` (`a48e2262-6180-4154-b26b-e36ec4aedc13`), restricted
+  to the Cloudflare `eu` jurisdiction
 - KV: `kitsos-api-auth-cache` (`86fb5bad46c6458d91cbb322b7178ccf`)
 - KV: `kitsos-api-usage-counters` (`4823ab0d3fd6452e8437631a3717f2b5`)
 - KV: dedicated MCP OAuth storage (create before the first MCP deployment)

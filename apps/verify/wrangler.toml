@@ -8,8 +8,8 @@ routes = [
 
 [[d1_databases]]
 binding = "DB"
-database_name = "kitsos-api"
-database_id = "c5ccab68-5f60-4b28-8ce9-20c57b8622ea"
+database_name = "kitsos-api-eu"
+database_id = "a48e2262-6180-4154-b26b-e36ec4aedc13"
 
 [[kv_namespaces]]
 binding = "AUTH_CACHE"

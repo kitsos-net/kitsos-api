@@ -2,16 +2,17 @@ name = "hide-my-email"
 main = "src/index.ts"
 compatibility_date = "2026-07-01"
 compatibility_flags = ["nodejs_compat"]
-[vars]
-CF_ACCOUNT_ID = "20c270570eda3ae89ef7d7a6d2ca1c8f"
 routes = [
   { pattern = "hme.api.kitsos.net", custom_domain = true }
 ]
 
+[vars]
+CF_ACCOUNT_ID = "20c270570eda3ae89ef7d7a6d2ca1c8f"
+
 [[d1_databases]]
 binding = "DB"
-database_name = "kitsos-api"
-database_id = "c5ccab68-5f60-4b28-8ce9-20c57b8622ea"
+database_name = "kitsos-api-eu"
+database_id = "a48e2262-6180-4154-b26b-e36ec4aedc13"
 
 [[kv_namespaces]]
 binding = "AUTH_CACHE"

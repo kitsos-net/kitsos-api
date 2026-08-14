@@ -7,9 +7,12 @@ weitermachen kann.
 ## Repo & Infrastruktur
 
 - **Repo:** `github.com/kitsos-net/kitsos-api` (privat)
-- **D1 Database:** `kitsos-api` (`c5ccab68-5f60-4b28-8ce9-20c57b8622ea`) — volles
-  Schema in `packages/auth/0001_init.sql` + Migrationen bis
-  `0007_product_limits.sql`
+- **D1 Database:** `kitsos-api-eu`
+  (`a48e2262-6180-4154-b26b-e36ec4aedc13`, Jurisdiction `eu`) — volles Schema
+  in `packages/auth/0001_init.sql` plus den nachfolgenden Migrationen. Die
+  frühere ENAM-Datenbank `kitsos-api`
+  (`c5ccab68-5f60-4b28-8ce9-20c57b8622ea`) bleibt seit dem Cutover vom
+  14. August 2026 unverändert als temporärer Rollback erhalten.
 - **KV Namespaces:**
   - `kitsos-api-auth-cache` (`86fb5bad46c6458d91cbb322b7178ccf`) — Auth-Result-Cache, 60s TTL
   - `kitsos-api-usage-counters` (`4823ab0d3fd6452e8437631a3717f2b5`) — Rate-/Usage-Limits
