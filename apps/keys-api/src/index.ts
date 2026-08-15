@@ -1173,7 +1173,11 @@ app.onError((_error, c) => c.json({ error: "internal-error" }, 500));
 const instrumented = withTelemetry(app, "keys-api");
 
 async function cleanupExpiredData(env: Env): Promise<void> {
-  await env.DB.batch([
+  const auditLogSize = await env.DB
+    .prepare("SELECT COUNT(*) AS count FROM audit_log")
+    .first<{ count: number }>()
+    .catch(() => null);
+  const statements = [
     env.DB.prepare(
       `DELETE FROM api_keys
        WHERE status = 'revoked'
@@ -1204,7 +1208,26 @@ async function cleanupExpiredData(env: Env): Promise<void> {
     env.DB.prepare(
       "DELETE FROM request_rate_counters WHERE expires_at <= unixepoch()"
     ),
-  ]);
+  ];
+  if (auditLogSize && auditLogSize.count > 10000) {
+    statements.push(env.DB.prepare(
+      `DELETE FROM audit_log
+       WHERE id IN (
+           SELECT id
+           FROM (
+             SELECT
+               id,
+               ROW_NUMBER() OVER (
+                 PARTITION BY user_id
+                 ORDER BY created_at DESC, id
+               ) AS history_rank
+             FROM audit_log
+           )
+           WHERE history_rank > 10000
+         )`
+    ));
+  }
+  await env.DB.batch(statements);
 }
 
 export default {

@@ -24,7 +24,9 @@ worker — imported directly into each app (`dns-manager`, `hide-my-email`,
    `limit_increase_requests` as the admin-approved increase flow.
 6. **Audit log** — every allow/deny decision is written to `audit_log` with
    authentication method, credential/grant id and OAuth client id where
-   available; logging never blocks the request.
+   available; logging never blocks the request. The daily `keys-api` scheduled
+   cleanup retains the newest 10,000 entries per user without scanning the
+   user's full history after every insert.
 
 ## Typical app worker
 

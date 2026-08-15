@@ -41,7 +41,10 @@ Migration 0013 replaces the legacy Utility umbrella policy with the four
 concrete Utility scopes. Migration 0014 adds bounded, user-managed MCP
 connections. Migration 0015 enforces dependency-safe verified resource
 deletion; key rotation itself uses the existing schema. Migration 0016 makes
-verified ownership global across current and future apps.
+verified ownership global across current and future apps. Migration 0017 adds
+Cloudflare Email Routing destination state for Hide My Email. Migration 0018
+moves the per-user audit-log retention scan from every insert to the daily
+`keys-api` scheduled cleanup.
 
 See [`apps/mcp/README.md`](./apps/mcp/README.md) for the MCP authorization
 model, deployment order and the explicit exclusion of Analytics, admin

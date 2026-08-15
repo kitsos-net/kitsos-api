@@ -172,3 +172,58 @@ sqlite3 "$global_db" "
 "
 
 echo "global resource migration passed"
+
+audit_db="$(mktemp /tmp/kitsos-audit-retention.XXXXXX)"
+trap 'rm -f "$test_db" "$global_db" "$audit_db"' EXIT
+
+for migration in packages/auth/00*.sql; do
+  sqlite3 "$audit_db" ".read $migration"
+done
+
+sqlite3 "$audit_db" "
+  CREATE TEMP TABLE audit_assertions (ok INTEGER NOT NULL CHECK (ok = 1));
+  INSERT INTO audit_assertions
+  SELECT COUNT(*) = 0
+  FROM sqlite_schema
+  WHERE type = 'trigger' AND name = 'trim_audit_log_after_insert';
+
+  INSERT INTO users (id, email)
+  VALUES ('audit-owner', 'audit-owner@example.com'),
+         ('audit-other', 'audit-other@example.com');
+
+  WITH RECURSIVE sequence(value) AS (
+    SELECT 1
+    UNION ALL
+    SELECT value + 1 FROM sequence WHERE value < 10002
+  )
+  INSERT INTO audit_log (id, user_id, action, result, created_at)
+  SELECT printf('owner-%05d', value), 'audit-owner', 'test', 'allowed', value
+  FROM sequence;
+
+  INSERT INTO audit_log (id, user_id, action, result, created_at)
+  VALUES ('other-1', 'audit-other', 'test', 'allowed', 1);
+
+  DELETE FROM audit_log
+  WHERE id IN (
+      SELECT id
+      FROM (
+        SELECT
+          id,
+          ROW_NUMBER() OVER (
+            PARTITION BY user_id
+            ORDER BY created_at DESC, id
+          ) AS history_rank
+        FROM audit_log
+      )
+      WHERE history_rank > 10000
+    );
+
+  INSERT INTO audit_assertions
+  SELECT COUNT(*) = 10000 FROM audit_log WHERE user_id = 'audit-owner';
+  INSERT INTO audit_assertions
+  SELECT MIN(created_at) = 3 FROM audit_log WHERE user_id = 'audit-owner';
+  INSERT INTO audit_assertions
+  SELECT COUNT(*) = 1 FROM audit_log WHERE user_id = 'audit-other';
+"
+
+echo "scheduled audit retention passed"
